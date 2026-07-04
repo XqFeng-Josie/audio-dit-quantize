@@ -33,6 +33,10 @@
 # Outputs:
 #   gen/<out_subdir>/<set>/*.wav
 #   results/<result_prefix>_*.txt
+#
+# Required data:
+#   data/seedtts_testset/zh/meta.lst and data/seedtts_testset/en/meta.lst
+#   Install with: bash scripts/download_seedtts_testset.sh
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"

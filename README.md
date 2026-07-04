@@ -24,6 +24,20 @@ git -C vendor/flatquant_ref apply ../../patches/flatquant_cudagraph_stream.patch
 
 ```
 
+Install the Seed-TTS test set before running any generation benchmark:
+
+```bash
+# Download from Google Drive into data/seedtts_testset/
+bash scripts/download_seedtts_testset.sh
+
+# Or reuse an existing local unpacked copy:
+SOURCE_DIR=/home/xiaoqin_feng/workspace/seed_repro/data/seedtts_testset \
+  bash scripts/download_seedtts_testset.sh
+
+test -f data/seedtts_testset/zh/meta.lst
+test -f data/seedtts_testset/en/meta.lst
+```
+
 ```bash
 source env.sh          # sets PYTHONPATH + repo/data/eval/gen/results paths
 ```
