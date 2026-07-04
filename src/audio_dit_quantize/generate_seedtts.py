@@ -14,6 +14,7 @@ Usage:
 import argparse, os, time
 import torch, soundfile as sf
 import audiodit  # noqa
+from tqdm import tqdm
 from audiodit import AudioDiTModel
 from transformers import AutoTokenizer
 from batch_inference import infer_one
@@ -66,16 +67,24 @@ def main():
         outdir = os.path.join(str(GEN_DIR), "paired", args.tag, setname)
         os.makedirs(outdir, exist_ok=True)
         t0 = time.time()
-        for idx, (uid, pt, pwa, gt) in enumerate(items):
+        iterator = tqdm(
+            enumerate(items),
+            total=len(items),
+            desc=f"gen {args.tag}/{setname}",
+            dynamic_ncols=True,
+        )
+        for idx, (uid, pt, pwa, gt) in iterator:
             op = os.path.join(outdir, f"{uid}.wav")
             if os.path.exists(op):
+                iterator.set_postfix_str("skip existing")
                 continue
             torch.manual_seed(args.base + idx); torch.cuda.manual_seed(args.base + idx)   # per-item, order-independent
             try:
                 wav = infer_one(gt, pt, pwa, model, tok, dev, args.nfe, args.cfg_strength, args.guidance)
                 sf.write(op, wav, model.config.sampling_rate)
+                iterator.set_postfix_str(uid[:32])
             except Exception as e:
-                print(f"[{args.tag}/{setname} {idx}] ERR {uid}: {e}")
+                tqdm.write(f"[{args.tag}/{setname} {idx}] ERR {uid}: {e}")
         print(f"[{args.tag}/{setname}] {len(items)} items in {time.time()-t0:.0f}s -> {outdir}", flush=True)
     print("GEN DONE")
 

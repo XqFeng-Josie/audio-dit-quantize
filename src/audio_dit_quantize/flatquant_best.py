@@ -19,6 +19,7 @@ Usage:
 """
 import argparse, math, os, time
 import torch, soundfile as sf
+from tqdm import tqdm
 
 import audiodit  # noqa
 from audiodit import AudioDiTModel
@@ -75,7 +76,7 @@ def capture_block_inputs(model, tok, dev, calib_items, max_seqs, per_item_keep, 
     store = []
     try:
         model.encode_prompt_audio = _enc
-        for it in calib_items:
+        for it in tqdm(calib_items, desc="capture calib", dynamic_ncols=True):
             cur.clear()
             h = block0.register_forward_pre_hook(hook, with_kwargs=True)
             try:
@@ -266,16 +267,24 @@ def main():
         outdir = os.path.join(genroot, name)
         os.makedirs(outdir, exist_ok=True)
         t0 = time.time()
-        for idx, (uid, pt, pwa, gt) in enumerate(items):
+        iterator = tqdm(
+            enumerate(items),
+            total=len(items),
+            desc=f"gen flat/{name}",
+            dynamic_ncols=True,
+        )
+        for idx, (uid, pt, pwa, gt) in iterator:
             op = os.path.join(outdir, f"{uid}.wav")
             if os.path.exists(op):
+                iterator.set_postfix_str("skip existing")
                 continue
             torch.manual_seed(args.base + idx); torch.cuda.manual_seed(args.base + idx)  # per-item, order-free
             try:
                 wav = infer_one(gt, pt, pwa, model, tok, dev, 16, 4.0, "apg")
                 sf.write(op, wav, model.config.sampling_rate)
+                iterator.set_postfix_str(uid[:32])
             except Exception as e:
-                print(f"[{name} {idx}] ERR {uid}: {e}")
+                tqdm.write(f"[{name} {idx}] ERR {uid}: {e}")
         print(f"[{name}] {len(items)} items in {time.time()-t0:.0f}s -> {outdir}")
     print("DONE")
 

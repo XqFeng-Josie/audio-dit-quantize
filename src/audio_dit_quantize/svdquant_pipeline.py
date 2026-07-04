@@ -13,6 +13,7 @@ Usage:
 """
 import argparse, os, time
 import torch, soundfile as sf
+from tqdm import tqdm
 
 import audiodit  # noqa
 from audiodit import AudioDiTModel
@@ -61,7 +62,7 @@ def capture_inputs(model, tok, dev, calib_items, rows_per_linear):
         return hook
 
     hooks = [lin.register_forward_pre_hook(mk(lin)) for _, _, lin in targets]
-    for uid, pt, pwa, gt in calib_items:
+    for uid, pt, pwa, gt in tqdm(calib_items, desc="capture svd calib", dynamic_ncols=True):
         infer_one(gt, pt, pwa, model, tok, dev, nfe=16, cfg_strength=4.0, guidance_method="apg")
     for h in hooks:
         h.remove()
@@ -74,7 +75,8 @@ def calibrate(model, tok, dev, calib_items, rows_per_linear, rank, a_bits=4):
     wrapped = sq.wrap_dit(model, w_bits=4, a_bits=a_bits, rank=rank)
     print(f"[calib] wrapped {len(wrapped)} linears; SVDQuant calibrate (alpha grid + SVD) ...")
     t0 = time.time()
-    for i, (parent, attr, sql) in enumerate(wrapped):
+    iterator = tqdm(wrapped, desc="svd calibrate", dynamic_ncols=True)
+    for i, (parent, attr, sql) in enumerate(iterator):
         bufs = store.get(id(sql.linear), [])
         if not bufs:
             # no captured activations -> fall back to alpha=0.5 with weight-only stats
@@ -84,9 +86,10 @@ def calibrate(model, tok, dev, calib_items, rows_per_linear, rank, a_bits=4):
         sql.calibrate(X)
         del X
         store[id(sql.linear)] = None
+        iterator.set_postfix_str(f"alpha={sql.alpha:.2f}")
         if (i + 1) % 40 == 0:
             torch.cuda.empty_cache()
-            print(f"[calib]  {i+1}/{len(wrapped)} (alpha={sql.alpha:.2f})  {time.time()-t0:.0f}s")
+            tqdm.write(f"[calib]  {i+1}/{len(wrapped)} (alpha={sql.alpha:.2f})  {time.time()-t0:.0f}s")
     torch.cuda.empty_cache()
     print(f"[calib] done in {time.time()-t0:.0f}s")
     return model
@@ -124,15 +127,23 @@ def main():
         outdir = os.path.join(genroot, name)
         os.makedirs(outdir, exist_ok=True)
         t0 = time.time()
-        for i, (uid, pt, pwa, gt) in enumerate(items):
+        iterator = tqdm(
+            enumerate(items),
+            total=len(items),
+            desc=f"gen svd/{name}",
+            dynamic_ncols=True,
+        )
+        for i, (uid, pt, pwa, gt) in iterator:
             op = os.path.join(outdir, f"{uid}.wav")
             if os.path.exists(op):
+                iterator.set_postfix_str("skip existing")
                 continue
             try:
                 wav = infer_one(gt, pt, pwa, model, tok, dev, 16, 4.0, "apg")
                 sf.write(op, wav, model.config.sampling_rate)
+                iterator.set_postfix_str(uid[:32])
             except Exception as e:
-                print(f"[{name} {i+1}] ERR {uid}: {e}")
+                tqdm.write(f"[{name} {i+1}] ERR {uid}: {e}")
         print(f"[{name}] {len(items)} items in {time.time()-t0:.0f}s -> {outdir}")
     print("DONE")
 

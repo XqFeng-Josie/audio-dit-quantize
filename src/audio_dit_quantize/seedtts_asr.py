@@ -154,7 +154,7 @@ def run_asr():
         raise NotImplementedError
 
     with open(res_path, "w") as fout:
-        for i in tqdm(range(0, len(params), batch_size)):
+        for i in tqdm(range(0, len(params), batch_size), desc=f"asr {lang}", dynamic_ncols=True):
             batch = params[i:i + batch_size]
             transcriptions = transcribe_with_fallback(batch, fn)
             for (wav_res_path, text_ref), transcription in zip(batch, transcriptions):

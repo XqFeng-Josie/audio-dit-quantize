@@ -17,6 +17,7 @@ from pathlib import Path
 import librosa
 import numpy as np
 import soundfile as sf
+from tqdm import tqdm
 
 
 def load_16khz(path: str) -> np.ndarray:
@@ -44,13 +45,11 @@ def score_utmos(wavs: list[str], device: str) -> str:
     dev = device if device else ("cuda:0" if torch.cuda.is_available() else "cpu")
     model = torch.hub.load("tarepan/SpeechMOS:main", "utmos22_strong", trust_repo=True).to(dev).eval()
     values = []
-    for idx, wav_path in enumerate(wavs):
+    for wav_path in tqdm(wavs, desc="utmos", dynamic_ncols=True):
         wav = load_16khz(wav_path)
         with torch.no_grad():
             score = model(torch.from_numpy(wav).unsqueeze(0).to(dev), 16000).item()
         values.append(score)
-        if (idx + 1) % 300 == 0:
-            print(f"[utmos] {idx+1}/{len(wavs)}", flush=True)
     return f"UTMOS: {np.mean(values):.3f}\n(n={len(values)})\n"
 
 
@@ -59,16 +58,14 @@ def score_dnsmos(wavs: list[str]) -> str:
 
     ovrl, p808 = [], []
     skipped = 0
-    for idx, wav_path in enumerate(wavs):
+    for wav_path in tqdm(wavs, desc="dnsmos", dynamic_ncols=True):
         try:
             scores = dnsmos.run(load_16khz(wav_path), 16000)
             ovrl.append(float(scores["ovrl_mos"]))
             p808.append(float(scores["p808_mos"]))
         except Exception as exc:
             skipped += 1
-            print(f"[dnsmos] skip {os.path.basename(wav_path)}: {exc}", flush=True)
-        if (idx + 1) % 300 == 0:
-            print(f"[dnsmos] {idx+1}/{len(wavs)}", flush=True)
+            tqdm.write(f"[dnsmos] skip {os.path.basename(wav_path)}: {exc}")
     if not ovrl:
         raise RuntimeError("DNSMOS produced no valid scores")
     if skipped:
