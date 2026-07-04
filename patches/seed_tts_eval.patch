@@ -1,0 +1,65 @@
+diff --git a/run_wer.py b/run_wer.py
+index 3df5068..17d47f0 100644
+--- a/run_wer.py
++++ b/run_wer.py
+@@ -1,7 +1,7 @@
+ import sys, os
+ from tqdm import tqdm
+ import multiprocessing
+-from jiwer import compute_measures
++import jiwer
+ from zhon.hanzi import punctuation
+ import string
+ import numpy as np
+@@ -25,7 +25,7 @@ def load_en_model():
+     return processor, model
+ 
+ def load_zh_model():
+-    model = AutoModel(model="paraformer-zh")
++    model = AutoModel(model="paraformer-zh", hub="hf", disable_update=True)
+     return model
+ 
+ def process_one(hypo, truth):
+@@ -50,12 +50,12 @@ def process_one(hypo, truth):
+     else:
+         raise NotImplementedError
+ 
+-    measures = compute_measures(truth, hypo)
++    measures = jiwer.process_words(truth, hypo)
+     ref_list = truth.split(" ")
+-    wer = measures["wer"]
+-    subs = measures["substitutions"] / len(ref_list)
+-    dele = measures["deletions"] / len(ref_list)
+-    inse = measures["insertions"] / len(ref_list)
++    wer = measures.wer
++    subs = measures.substitutions / len(ref_list)
++    dele = measures.deletions / len(ref_list)
++    inse = measures.insertions / len(ref_list)
+     return (raw_truth, raw_hypo, wer, subs, dele, inse)
+ 
+ 
+@@ -90,9 +90,8 @@ def run_asr(wav_res_text_path, res_path):
+             if sr != 16000:
+                 wav = scipy.signal.resample(wav, int(len(wav) * 16000 / sr))
+             input_features = processor(wav, sampling_rate=16000, return_tensors="pt").input_features
+-            input_features = input_features.to(device)
+-            forced_decoder_ids = processor.get_decoder_prompt_ids(language="english", task="transcribe")
+-            predicted_ids = model.generate(input_features, forced_decoder_ids=forced_decoder_ids)
++            input_features = input_features.to(device).to(model.dtype)
++            predicted_ids = model.generate(input_features, language="english", task="transcribe")
+             transcription = processor.batch_decode(predicted_ids, skip_special_tokens=True)[0]
+         elif lang == "zh":
+             res = model.generate(input=wav_res_path,
+diff --git a/thirdparty/UniSpeech/downstreams/speaker_verification/models/ecapa_tdnn.py b/thirdparty/UniSpeech/downstreams/speaker_verification/models/ecapa_tdnn.py
+index 1806b39..1f4106f 100644
+--- a/thirdparty/UniSpeech/downstreams/speaker_verification/models/ecapa_tdnn.py
++++ b/thirdparty/UniSpeech/downstreams/speaker_verification/models/ecapa_tdnn.py
+@@ -194,7 +194,7 @@ class ECAPA_TDNN(nn.Module):
+         else:
+             if config_path is None:
+                 torch.hub._validate_not_a_forked_repo=lambda a,b,c: True
+-                self.feature_extract = torch.hub.load('s3prl/s3prl', feat_type)
++                self.feature_extract = torch.hub.load('s3prl/s3prl', feat_type, trust_repo=True)
+             else:
+                 self.feature_extract = UpstreamExpert(config_path)
+             if len(self.feature_extract.model.encoder.layers) == 24 and hasattr(self.feature_extract.model.encoder.layers[23].self_attn, "fp32_attention"):

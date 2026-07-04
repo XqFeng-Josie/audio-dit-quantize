@@ -1,0 +1,54 @@
+diff --git a/deploy/kernels/gemm.cu b/deploy/kernels/gemm.cu
+index b8f6643..5bf32f9 100644
+--- a/deploy/kernels/gemm.cu
++++ b/deploy/kernels/gemm.cu
+@@ -1,5 +1,6 @@
+ #include <cutlass/gemm/device/gemm.h>
+ #include <gemm.h>
++#include <ATen/cuda/CUDAContext.h>  // at::cuda::getCurrentCUDAStream (CUDA-graph capture safety)
+ 
+ 
+ 
+@@ -38,7 +39,11 @@ void matmul_host(
+             {1,                                0}
+     };
+ 
+-    auto status = gemmOp(arguments);
++    // Launch on the CURRENT PyTorch stream (not the legacy default stream): CUTLASS's
++    // operator() defaults stream=nullptr -> default stream, which is NOT captured by
++    // CUDA-graph (PyTorch captures the current stream) -> the GEMM is silently dropped
++    // on replay and the output stays zero. Passing the current stream makes it capturable.
++    auto status = gemmOp(arguments, nullptr, at::cuda::getCurrentCUDAStream());
+ 
+     ensure(status == cutlass::Status::kSuccess,
+            cutlassGetStatusString(status));
+diff --git a/deploy/kernels/quant.cu b/deploy/kernels/quant.cu
+index a2d9b75..867490b 100644
+--- a/deploy/kernels/quant.cu
++++ b/deploy/kernels/quant.cu
+@@ -1,4 +1,5 @@
+ #include <quant.h>
++#include <ATen/cuda/CUDAContext.h>  // at::cuda::getCurrentCUDAStream (CUDA-graph capture safety)
+ 
+ 
+ template<typename T>
+@@ -59,7 +60,8 @@ void sym_quant_host(
+ 
+     dim3 block{std::min<uint32_t>(colsDst, 32), std::min<uint32_t>(rows, 16)};
+     dim3 grid{cdiv(colsDst, block.x), cdiv(rows, block.y)};
+-    sym_quantize_f16_i4_kernel<<<grid, block>>>(x, scale, rows, colsSrc, colsDst, q);
++    // current stream (not default) -> CUDA-graph capturable
++    sym_quantize_f16_i4_kernel<<<grid, block, 0, at::cuda::getCurrentCUDAStream()>>>(x, scale, rows, colsSrc, colsDst, q);
+ }
+ 
+ 
+@@ -94,7 +96,8 @@ void sym_dequant_host(const int32_t *q,
+ {
+     dim3 block{std::min<uint32_t>(cols, 16), std::min<uint32_t>(rows, 16)};
+     dim3 grid{cdiv(cols, block.x), cdiv(rows, block.y)};
+-    sym_dequantize_i32_f16_kernel<<<grid, block>>>(
++    // current stream (not default) -> CUDA-graph capturable
++    sym_dequantize_i32_f16_kernel<<<grid, block, 0, at::cuda::getCurrentCUDAStream()>>>(
+             q,
+             scale_row, scale_col,
+             rows, cols, x);
