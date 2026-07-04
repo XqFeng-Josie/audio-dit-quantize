@@ -19,6 +19,7 @@
 #
 # Common env knobs:
 #   RANK=32             SVD low-rank residual rank
+#   CALIB_SEED=0        calibration RNG seed
 #   BASE=1024           per-item generation seed base
 #   LIMIT=0             items per set; 0 means full set
 #   TAG=svd             generated wav tag under gen/paired/
@@ -71,6 +72,7 @@ echo "=== [SVDQuant/$which_model] generate sets=$sets_csv tag=$tag ==="
   --limit "$limit" \
   --model_dir "$model_dir" \
   --rank "${RANK:-32}" \
+  --calib_seed "${CALIB_SEED:-0}" \
   --device "$DEVICE"
 
 echo "=== [SVDQuant/$which_model] evaluate ==="

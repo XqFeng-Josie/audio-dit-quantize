@@ -101,6 +101,8 @@ def main():
     ap.add_argument("--model_dir", default="meituan-longcat/LongCat-AudioDiT-1B")
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--calib_rows", type=int, default=512)
+    ap.add_argument("--calib_seed", type=int, default=None,
+                    help="pin calibration inference and activation-row sampling; None leaves RNG uncontrolled")
     ap.add_argument("--rank", type=int, default=32)
     ap.add_argument("--a_bits", type=int, default=4, help="activation bits (4=W4A4 default, 8=W4A8)")
     ap.add_argument("--sets", default="zh,en,hard", help="comma list of Seed sets to generate")
@@ -113,6 +115,11 @@ def main():
     model.vae.to_half(); model.eval()
     tok = AutoTokenizer.from_pretrained(model.config.text_encoder_model)
     genroot = os.path.join(str(GEN_DIR), args.out_subdir)
+
+    if args.calib_seed is not None:
+        torch.manual_seed(args.calib_seed)
+        torch.cuda.manual_seed_all(args.calib_seed)
+        print(f"[calib] pinned to seed {args.calib_seed}")
 
     calib = load_calib_items()
     calibrate(model, tok, dev, calib, args.calib_rows, args.rank, a_bits=args.a_bits)

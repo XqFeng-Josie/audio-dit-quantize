@@ -76,6 +76,7 @@ bash scripts/benchmark_flatquant_best_seedtts.sh 3.5b
 
 # 3) SVDQuant W4A4 under the current order-free paired protocol.
 #    Quant calibration is fixed at data/calib_heldout_hardlike32.lst.
+#    Seeds: CALIB_SEED=0 for quant calibration, BASE=1024 for generation.
 bash scripts/benchmark_svdquant_seedtts.sh 1b
 bash scripts/benchmark_svdquant_seedtts.sh 3.5b
 ```

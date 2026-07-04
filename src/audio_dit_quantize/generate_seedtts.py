@@ -24,7 +24,7 @@ from .precision import apply_precision   # int8
 from .paths import GEN_DIR
 
 
-def prep(mode, model, tok, dev, rank):
+def prep(mode, model, tok, dev, rank, calib_seed):
     if mode == "fp32":
         return
     if mode == "int8":
@@ -35,6 +35,10 @@ def prep(mode, model, tok, dev, rank):
             m.freeze()
         return
     if mode == "svdquant":
+        if calib_seed is not None:
+            torch.manual_seed(calib_seed)
+            torch.cuda.manual_seed_all(calib_seed)
+            print(f"[prep] svdquant calibration pinned to seed {calib_seed}", flush=True)
         calib = rs.load_calib_items()
         rs.calibrate(model, tok, dev, calib, 512, rank, a_bits=4)
 
@@ -47,6 +51,8 @@ def main():
     ap.add_argument("--sets", default="hard", help="comma list of Seed sets (zh,en,hard) — per-item seeded")
     ap.add_argument("--model_dir", default="meituan-longcat/LongCat-AudioDiT-1B")
     ap.add_argument("--rank", type=int, default=32)
+    ap.add_argument("--calib_seed", type=int, default=None,
+                    help="pin quant calibration randomness; None leaves calibration RNG uncontrolled")
     ap.add_argument("--nfe", type=int, default=16, help="ODE time points; forwards=2*(nfe-1) under CFG/APG")
     ap.add_argument("--guidance", default="apg", choices=["cfg", "apg"])
     ap.add_argument("--cfg_strength", type=float, default=4.0)
@@ -58,7 +64,7 @@ def main():
     model = AudioDiTModel.from_pretrained(args.model_dir).to(dev)
     model.vae.to_half(); model.eval()
     tok = AutoTokenizer.from_pretrained(model.config.text_encoder_model)
-    prep(args.mode, model, tok, dev, args.rank)
+    prep(args.mode, model, tok, dev, args.rank, args.calib_seed)
 
     for setname in [s.strip() for s in args.sets.split(",") if s.strip()]:
         items = rs.load_items(os.path.join(rs.DATA, rs.SETS[setname]))
