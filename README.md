@@ -25,10 +25,61 @@ git -C vendor/flatquant_ref apply ../../patches/flatquant_cudagraph_stream.patch
 ```
 
 ```bash
-source env.sh          # sets PYTHONPATH + SEED_REPRO_DIR + LONGCAT_DIR + cu130 toolchain
+source env.sh          # sets PYTHONPATH + repo/data/eval/gen/results paths
 ```
-1. Reproduce the LongCat-AudioDiT Seed-TTS benchmark at fp32
 
-2. FlatQuant W4A4, paper-aligned best-config 
-<!-- Per-block reconstruction + LWC + LAC + add_diag + learned Kronecker transform, `hardlike32` calibration. -->
+`seedtts_similarity.py` needs `eval/ckpt/wavlm_large_finetune.pth`; alternatively export
+`WAVLM_CKPT=/path/to/wavlm_large_finetune.pth`.
 
+## Run
+
+Layout:
+
+```text
+scripts/                 shell launchers for experiments/evaluation
+src/audio_dit_quantize/  importable Python package: quantization, generation, eval helpers
+data/ eval/ vendor/      external assets, gitignored where large
+gen/ results/            generated audio and metric outputs
+```
+
+Each experiment line has its own launcher; method logic stays in separate Python modules.
+Generation launchers run evaluation automatically after generation. The default
+evaluation metrics are CER/WER plus MOS (`utmos` + `dnsmos`).
+
+```bash
+# 1) Reproduce the LongCat-AudioDiT Seed-TTS benchmark at fp32.
+bash scripts/benchmark_fp32_seedtts.sh 1b
+bash scripts/benchmark_fp32_seedtts.sh 3.5b
+
+# 2) FlatQuant W4A4, paper-aligned best-config:
+#    per-block + LWC + LAC + add_diag + learned Kronecker.
+#    Quant calibration is fixed at data/calib_heldout_hardlike32.lst.
+bash scripts/benchmark_flatquant_best_seedtts.sh 1b
+bash scripts/benchmark_flatquant_best_seedtts.sh 3.5b
+
+# 3) SVDQuant W4A4 under the current order-free paired protocol.
+#    Quant calibration is fixed at data/calib_heldout_hardlike32.lst.
+bash scripts/benchmark_svdquant_seedtts.sh 1b
+bash scripts/benchmark_svdquant_seedtts.sh 3.5b
+```
+
+Useful smoke-test knob:
+
+```bash
+LIMIT=1 bash scripts/benchmark_fp32_seedtts.sh 1b hard
+LIMIT=1 bash scripts/benchmark_flatquant_best_seedtts.sh 1b hard
+LIMIT=1 bash scripts/benchmark_svdquant_seedtts.sh 1b hard
+```
+
+Metric evaluation is a single entry point. By default it computes CER for `zh`
+and `hard`, WER for `en`, and MOS (`utmos` + `dnsmos`) for every requested set:
+
+```bash
+bash scripts/evaluate_seedtts_metrics.sh gen/paired/fp32 pf_fp32 "zh en hard"
+```
+
+Optional speaker similarity can be attached to the same generation run:
+
+```bash
+EVAL_METRICS="wer cer mos sim" bash scripts/benchmark_fp32_seedtts.sh 1b "zh en hard"
+```

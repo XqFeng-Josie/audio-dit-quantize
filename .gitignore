@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.pyc
+
+data/seedtts_testset/
+eval/seed-tts-eval/
+eval/ckpt/
+vendor/flatquant_ref/
+
+gen/
+logs/
+results/
