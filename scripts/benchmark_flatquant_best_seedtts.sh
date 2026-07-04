@@ -36,6 +36,7 @@
 #
 # Required data:
 #   data/seedtts_testset/zh/meta.lst and data/seedtts_testset/en/meta.lst
+#   eval/ckpt/wavlm_large_finetune.pth when running SIM
 #   Install with: bash scripts/download_seedtts_testset.sh
 set -euo pipefail
 

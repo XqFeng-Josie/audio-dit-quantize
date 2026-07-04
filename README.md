@@ -24,18 +24,21 @@ git -C vendor/flatquant_ref apply ../../patches/flatquant_cudagraph_stream.patch
 
 ```
 
-Install the Seed-TTS test set before running any generation benchmark:
+Install the Seed-TTS eval assets before running benchmarks. This installs the
+test set and the WavLM checkpoint used by optional SIM evaluation:
 
 ```bash
-# Download from Google Drive into data/seedtts_testset/
+# Download from Google Drive into data/seedtts_testset/ and eval/ckpt/
 bash scripts/download_seedtts_testset.sh
 
-# Or reuse an existing local unpacked copy:
+# Or reuse existing local unpacked assets:
 SOURCE_DIR=/home/xiaoqin_feng/workspace/seed_repro/data/seedtts_testset \
+WAVLM_SOURCE=/home/xiaoqin_feng/workspace/seed_repro/eval/ckpt/wavlm_large_finetune.pth \
   bash scripts/download_seedtts_testset.sh
 
 test -f data/seedtts_testset/zh/meta.lst
 test -f data/seedtts_testset/en/meta.lst
+test -f eval/ckpt/wavlm_large_finetune.pth
 ```
 
 ```bash
