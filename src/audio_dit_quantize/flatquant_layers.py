@@ -173,3 +173,10 @@ def wrap_dit(model, w_bits=4, a_bits=4, use_trans=True, lwc=True, a_sym=False, l
         setattr(parent, attr, fq)
         wrapped.append(fq)
     return wrapped
+
+
+# Backward-compat for pickled models: best-config models saved when this module was the top-level
+# `flatquant_dit` module (seed_repro) pickle their layers as `flatquant_dit.FlatQuantLinear`. Register
+# the old name as an alias for this module so `torch.load(<whole model>, weights_only=False)` resolves it.
+import sys as _sys
+_sys.modules.setdefault("flatquant_dit", _sys.modules[__name__])

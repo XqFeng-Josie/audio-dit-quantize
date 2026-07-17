@@ -25,6 +25,10 @@
 #   MOS_METRICS="utmos dnsmos"  MOS backends to run
 #   MOS_LIMIT=0                 limit wavs for MOS; 0 means full set
 #   DEVICE=cuda:0               device for ASR/SIM/UTMOS where applicable
+#   ASR_DEVICE=cuda:0           override ASR device; defaults to DEVICE
+#   ASR_BATCH_SIZE=auto         auto-tune ASR batch from GPU memory; set an int to override
+#   ASR_BATCH_SIZE_S=auto       auto-tune FunASR zh batch_size_s; set an int to override
+#   ASR_GPU_MEM_GIB=40          override detected GPU memory for ASR auto-tuning
 #
 # Outputs:
 #   results/<result_prefix>_<set>_cer.txt or results/<result_prefix>_<set>_wer.txt
@@ -57,6 +61,38 @@ case "$gen_root" in
 esac
 
 mkdir -p "$SEED_RESULTS_DIR"
+
+detect_asr_gpu_mem() {
+  [ -z "${ASR_GPU_MEM_GIB:-}" ] || return 0
+  command -v nvidia-smi >/dev/null 2>&1 || return 0
+
+  local asr_device="${ASR_DEVICE:-$DEVICE}"
+  case "$asr_device" in
+    cuda|cuda:*) ;;
+    *) return 0 ;;
+  esac
+
+  local logical_index=0
+  case "$asr_device" in
+    cuda:*) logical_index="${asr_device#cuda:}" ;;
+  esac
+
+  local visible="${CUDA_VISIBLE_DEVICES:-${GPU_INDEX:-0}}"
+  local gpu_index="${GPU_INDEX:-$logical_index}"
+  IFS=',' read -r -a visible_gpus <<< "$visible"
+  if [ "$logical_index" -lt "${#visible_gpus[@]}" ]; then
+    gpu_index="${visible_gpus[$logical_index]}"
+  fi
+
+  local mem_mib
+  mem_mib="$(nvidia-smi -i "$gpu_index" --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -n1 | tr -d ' ')"
+  if [ -n "$mem_mib" ]; then
+    export ASR_GPU_MEM_GIB
+    ASR_GPU_MEM_GIB="$(awk -v m="$mem_mib" 'BEGIN { printf "%.3f", m / 1024 }')"
+  fi
+}
+
+detect_asr_gpu_mem
 
 want_metric() {
   case " $metrics " in

@@ -39,5 +39,16 @@ FLATQUANT_REF_DIR = _resolve_env_path(
 )
 CALIB_LST = (REPO_ROOT / "data" / "calib_heldout_hardlike32.lst").resolve()
 
+# ONE canonical location for the fixed best-config calibration models, shared by every script that loads
+# them (generate_step_axis, w4a4_deploy_quality, w4a4_deploy_check_numerics). Override the dir with
+# SEED_MODELS_DIR (e.g. point at an existing calibration dir instead of copying the 5–15 GB files).
+MODELS_DIR = _resolve_env_path("SEED_MODELS_DIR", REPO_ROOT / "models")
+
+
+def bc_model_path(model_dir: str) -> Path:
+    """Canonical fixed best-config model path for a HF model_dir (1B -> bc_1b_model.pt, 3.5B -> bc_3p5b_model.pt)."""
+    tag = "3p5b" if ("3.5" in model_dir or "3p5" in model_dir) else "1b"
+    return MODELS_DIR / f"bc_{tag}_model.pt"
+
 
 SETS = {"zh": "zh/meta.lst", "en": "en/meta.lst", "hard": "zh/hardcase.lst"}

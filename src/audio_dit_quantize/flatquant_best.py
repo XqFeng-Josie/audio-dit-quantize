@@ -26,7 +26,7 @@ from audiodit import AudioDiTModel
 from transformers import AutoTokenizer
 from batch_inference import infer_one
 from . import flatquant_layers as fq
-from .paths import CALIB_LST, DATA_DIR, GEN_DIR, SETS
+from .paths import CALIB_LST, DATA_DIR, GEN_DIR, SETS, bc_model_path
 
 DATA = str(DATA_DIR)
 
@@ -210,7 +210,9 @@ def main():
     ap.add_argument("--sets", default="hard", help="comma list of {zh,en,hard} or 'all'")
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--max_seqs", type=int, default=64)
-    ap.add_argument("--per_item_keep", type=int, default=8)
+    ap.add_argument("--per_item_keep", type=int, default=2,
+                    help="activation snapshots kept per calib prompt. 2 = the canonical recipe that produced the "
+                         "fixed bc_*.pt models (so --save_model reproduces them + --load_model matches).")
     ap.add_argument("--steps", type=int, default=200)
     ap.add_argument("--mb", type=int, default=4)
     ap.add_argument("--lr", type=float, default=5e-3)
@@ -233,31 +235,46 @@ def main():
     ap.add_argument("--calib_seed", type=int, default=None,
                     help="pin the calibration draw (capture noise + training randperm) for reproducibility; "
                          "None = uncontrolled RNG (legacy behaviour). Set it so zh/en/hard from one launch share one calib.")
+    ap.add_argument("--model", default=None,
+                    help="canonical fixed-model path (default: from --model_dir; override dir with SEED_MODELS_DIR)")
+    ap.add_argument("--load_model", action="store_true",
+                    help="skip calibration and LOAD --model — its W4A4 numbers then match the step-axis 'full' baseline exactly")
+    ap.add_argument("--save_model", action="store_true",
+                    help="after calibration, torch.save to --model — makes this the ONE producer of the canonical fixed model")
     ap.add_argument("--device", default="cuda:0")
     args = ap.parse_args()
     dev = torch.device(args.device)
-
-    model = AudioDiTModel.from_pretrained(args.model_dir).to(dev)
-    model.vae.to_half(); model.eval()
-    tok = AutoTokenizer.from_pretrained(model.config.text_encoder_model)
+    model_path = args.model or str(bc_model_path(args.model_dir))
     genroot = os.path.join(str(GEN_DIR), args.out_subdir)
-    if args.calib_seed is not None:
-        torch.manual_seed(args.calib_seed); torch.cuda.manual_seed_all(args.calib_seed)
-        print(f"[pb] calibration pinned to seed {args.calib_seed}")
 
-    if not CALIB_LST.exists():
-        raise FileNotFoundError(f"fixed calibration list not found: {CALIB_LST}")
-    calib = load_items(CALIB_LST)
-    print(f"[pb] calib = {len(calib)} items from {CALIB_LST}")
-    print(f"[pb] capturing block-0 activations on {len(calib)} prompts ...")
-    store = capture_block_inputs(model, tok, dev, calib, args.max_seqs, args.per_item_keep)
-    print(f"[pb] captured {len(store)} sequences")
-
-    fq.wrap_dit(model, w_bits=4, a_bits=args.a_bits, use_trans=True, lwc=True,
-                a_sym=args.a_sym, lac=not args.no_lac, add_diag=not args.no_diag)
-    calibrate_perblock(model, store, dev, steps=args.steps, mb=args.mb,
-                       lr=args.lr, clip_lr=args.clip_lr, loss_type=args.loss,
-                       region_gen_w=args.region_gen_w, region_prompt_w=args.region_prompt_w)
+    if args.load_model:
+        # consistency mode: reuse the ONE fixed model (produced once by --save_model) instead of re-calibrating
+        print(f"[pb] loading fixed calibrated model from {model_path}")
+        model = torch.load(model_path, weights_only=False, map_location=dev); model.eval()
+        tok = AutoTokenizer.from_pretrained(model.config.text_encoder_model)
+    else:
+        model = AudioDiTModel.from_pretrained(args.model_dir).to(dev)
+        model.vae.to_half(); model.eval()
+        tok = AutoTokenizer.from_pretrained(model.config.text_encoder_model)
+        if args.calib_seed is not None:
+            torch.manual_seed(args.calib_seed); torch.cuda.manual_seed_all(args.calib_seed)
+            print(f"[pb] calibration pinned to seed {args.calib_seed}")
+        if not CALIB_LST.exists():
+            raise FileNotFoundError(f"fixed calibration list not found: {CALIB_LST}")
+        calib = load_items(CALIB_LST)
+        print(f"[pb] calib = {len(calib)} items from {CALIB_LST}")
+        print(f"[pb] capturing block-0 activations on {len(calib)} prompts ...")
+        store = capture_block_inputs(model, tok, dev, calib, args.max_seqs, args.per_item_keep)
+        print(f"[pb] captured {len(store)} sequences")
+        fq.wrap_dit(model, w_bits=4, a_bits=args.a_bits, use_trans=True, lwc=True,
+                    a_sym=args.a_sym, lac=not args.no_lac, add_diag=not args.no_diag)
+        calibrate_perblock(model, store, dev, steps=args.steps, mb=args.mb,
+                           lr=args.lr, clip_lr=args.clip_lr, loss_type=args.loss,
+                           region_gen_w=args.region_gen_w, region_prompt_w=args.region_prompt_w)
+        if args.save_model:
+            os.makedirs(os.path.dirname(model_path) or ".", exist_ok=True)
+            torch.save(model, model_path)
+            print(f"[pb] saved canonical fixed model -> {model_path}")
 
     sel = list(SETS) if args.sets == "all" else [s.strip() for s in args.sets.split(",")]
     for name in sel:

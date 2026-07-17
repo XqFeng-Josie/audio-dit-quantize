@@ -12,6 +12,7 @@ export SEED_EVAL_DIR="$AQ/eval/seed-tts-eval"                  # ASR/SIM harness
 export SEED_DATA_DIR="${SEED_DATA_DIR:-$AQ/data/seedtts_testset}"
 export SEED_GEN_DIR="${SEED_GEN_DIR:-$AQ/gen}"
 export SEED_RESULTS_DIR="${SEED_RESULTS_DIR:-$AQ/results}"
+export SEED_MODELS_DIR="${SEED_MODELS_DIR:-$AQ/models}"        # fixed best-config models bc_{1b,3p5b}_model.pt (one canonical dir; point elsewhere to avoid copying)
 export WAVLM_CKPT="${WAVLM_CKPT:-$AQ/eval/ckpt/wavlm_large_finetune.pth}"
 export FLATQUANT_REF_DIR="$AQ/vendor/flatquant_ref"           # FlatQuant algo + int4 deploy kernels (incl. HP fp32 kron)
 export PYTHON_BIN="${PYTHON_BIN:-$AQ/.venv/bin/python}"
