@@ -2,9 +2,6 @@
 
 > 本文档是本项目的**长期维护实验档案**：研究目标、实验方法、实验记录、结果分析都在这里。
 > 面向读者：不要求语音背景。每次新增实验请按 [维护指南](#8-维护指南) 追加记录，不要删除历史结论。
->
-> 创建：2026-07-18。状态：**从头实验**（旧标定集已于 2026-07-18 删除，见 §5.3）。
-
 ---
 
 ## 1. 一句话概述
@@ -146,22 +143,6 @@ FlatQuant 标定流程：32 条标定数据各跑一次全精度推理（16 步 
 | ≤2026-07 | **chanbal loss（1/方差通道加权）在逐 block 粒度下全面差于普通 MSE；在逐 linear 粒度下明显更好**（均为 best config 下） | 历史实验（旧标定集） | 通道加权是真实杠杆但 1/var 在残差流上方向反了；催生 §6 的 GATE-A（敏感度加权） |
 | ≤2026-07 | 晚期 ODE 步保持激活全精度可恢复 SIM（step-axis 实验，LATE 有效、EARLY 同预算无效） | `scripts/benchmark/benchmark_step_axis_seedtts.sh` | 时间步敏感度不均匀——GATE-B 失败时的备选方向（时间步选择）已有先验支持 |
 
-### 5.2 chanbal 现象的机制假设（待 GATE-A 验证）
-
-块输出是残差流，方差被少数功能上极重要的离群通道主导（量化领域共识：这些通道最需保护）。1/var 恰好把它们**降权**→ 逐 block 下系统性变差；逐 linear 的输出无此残差离群结构 → 平衡有正收益。推论：换成**下游敏感度权重**（任务代理 loss 对通道的梯度平方，Fisher 风格，预期给离群通道**升权**）应能取回收益。可零成本先验证：各 block 上 Fisher 权重与 1/var 权重应**负相关**。
-
-### 5.3 旧标定集的污染审计与删除（2026-07-18）
-
-旧标定集 `data/calib_heldout_hardlike32.lst`（32 条，zh prompt × 绕口令风格文本）的重叠审计：
-
-| 重叠层面 | 结果 |
-|---|---|
-| 精确 (prompt, 文本) 配对 vs 测试条目 | 0/32（"heldout"仅是配对级） |
-| prompt 音频 | 16 个中 **8 个**同时是 zh 测试条目的 prompt |
-| 说话人 | 16 个中 **8 个**出现在 zh 测试集 |
-| 目标文本 | 32 条中 **9 条**是测试集真实文本 |
-
-即：**L0 干净、L1/L2 污染**。对（同一列表下的）方法间对比是内部公平的；但作为数据选择研究的候选池会让"选好数据"退化为"选和测试集像的数据"，且可能通过说话人泄漏抬高 SIM。**处置**：2026-07-18 从工作区删除，从头实验；如需复现旧 baseline，git 历史可找回（`git show b746150:data/calib_heldout_hardlike32.lst`）。旧 baseline 数字仅作历史参考，不进论文主表。
 
 **当前仓库状态**（2026-07-18 更新）：标定列表已参数化——`flatquant_best.py` / `generate_seedtts.py`（svdquant、quarot_gptq 两条路径）支持 `--calib_lst`，`paths.py` 的默认值可被 `SEED_CALIB_LST` 环境变量覆盖（shell 启动器零改动换列表）。默认路径仍指向已删除的旧文件——**新实验必须显式传入干净池生成的列表**，否则报错并提示传参。注意：列表中 prompt 音频路径按"相对列表文件所在目录"解析（`load_items` 行为），建池时保持这一约定。
 
@@ -174,7 +155,7 @@ FlatQuant 标定流程：32 条标定数据各跑一次全精度推理（16 步 
 | ID | 实验 | 内容 | 判定标准 | 状态 |
 |---|---|---|---|---|
 | **E0** | 工程解锁 | `--calib_lst` 参数化；候选池构建（§4.3）+ 重叠审计脚本；dev/test 划分冻结；Phase 0 批量驱动脚本 | 全管线用新池冒烟跑通 | **进行中**（2026-07-18：参数化已完成——三个 python 入口支持 `--calib_lst`，shell 启动器支持 `SEED_CALIB_LST` 环境变量；语料已就位：`data/calib_corpora/aishell3/`（88,035 wav，218 说话人，含 spk-info 性别/年龄/口音元数据与拼音转写）+ `data/calib_corpora/LibriTTS/dev-clean/`（5,736 wav，带 normalized 文本）。**候选池 v1 已建成并通过审计**（§4.3.1）；**dev/heldtest 划分已冻结**（§4.3）；**Phase 0 驱动就绪**：`scripts/calib/phase0_sensitivity.sh`（fp32 参照 + K 组随机标定 + seed 重复，GPU 池波次调度、幂等续跑、自动评测收集，汇总 `phase0_collect.py`）。仅剩 GPU 冒烟：`LIMIT=2 K=2 SEED_REPEATS="1" EVAL_METRICS="cer wer" bash scripts/calib/phase0_sensitivity.sh 1b`） |
-| **E1** | 污染溢价锚点 | 干净池随机 32 条标定一次 vs 旧列表基线（dev，配对） | 差距是否集中于 SIM（说话人泄漏证据） | 未开始 |
+| ~~E1~~ | ~~污染溢价锚点~~ | ~~干净池随机 32 条 vs 旧列表基线~~ | — | **已取消**（2026-07-19 用户决定：旧列表已删除，不再与其比较；污染影响仅保留 §5.3 的审计记录作为定性论据） |
 | **GATE-B** | 敏感性研究（Phase 0） | K=8–12 组随机 32 条集各标定评测 + 同一集 3–4 个 calib_seed 作噪声基线。**驱动就绪**：`GPUS=... K=10 bash scripts/calib/phase0_sensitivity.sh 1b`；汇总表 `results/p0_summary.csv`（`phase0_collect` 直接打印 组间std/seed std 比值 + oracle gap 的门判读） | **组间方差 ≫ seed 方差**且 oracle gap（最好-最差随机集）值得追 → 主线开绿灯；否则转时间步选择 | 待启动（等 GPU 冒烟通过） |
 | **E2** | 敏感度统计模块 | 捕获态上 Hutchinson 探针反传单步 DiT 输出 → 逐 block 逐通道梯度平方；支持 prompt/生成区分开；按样本聚合出数据影响力分数 | 基础设施，无判定 | 未开始 |
 | **GATE-A** | 损失加权三组对照 | var 加权（反向 chanbal）/ Fisher 通道加权 / Fisher token×通道，各 vs uniform-MSE（配对 bootstrap） | 任一显著优于 uniform → 副线成立；全在噪声内 → 副线收缩为消融 | 未开始 |

@@ -20,7 +20,7 @@ Usage:
       --model_dir meituan-longcat/LongCat-AudioDiT-3.5B --out_subdir flatquant_pb_3.5b \
       --sets hard --limit 0
 """
-import argparse, math, os, time
+import argparse, json, math, os, time
 import numpy as np
 import torch, soundfile as sf
 from tqdm import tqdm
@@ -130,7 +130,10 @@ def _chanbal_weight(fp_outs, dev):
 
 def calibrate_perblock(model, store, dev, steps=200, mb=4, lr=5e-3, clip_lr=5e-2, loss_type="mse",
                        region_gen_w=1.0, region_prompt_w=1.0, drift=False, diag_alpha=0.3,
-                       diag_init=True):
+                       diag_init=True, stats_out=None, stats_meta=None):
+    """stats_out: optional JSON path — records per-block first/last/min training loss. These are
+    cheap calibration-set-quality signals for the P1 proxy-feature regression (computable without
+    any generation/eval). Pure logging: the training math is untouched."""
     assert loss_type in ("mse", "chanbal")
     blocks = model.transformer.blocks
     for p in model.parameters():              # only the per-block quant params train; freeze the rest
@@ -158,6 +161,7 @@ def calibrate_perblock(model, store, dev, steps=200, mb=4, lr=5e-3, clip_lr=5e-2
           + (f" | sq_style diag init a={diag_alpha}" if diag_init else "")
           + (f" | region gen_w={region_gen_w} prompt_w={region_prompt_w}" if region else ""))
     t0 = time.time()
+    stats = []
     for bi, blk in enumerate(blocks):
         ws = _block_wrappers(blk)
         if not ws:
@@ -191,6 +195,7 @@ def calibrate_perblock(model, store, dev, steps=200, mb=4, lr=5e-3, clip_lr=5e-2
                                  {"params": clip_p, "lr": clip_lr}])
         # eta_min = flat_lr*1e-3: official train_utils.py cosine floor
         sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=steps, eta_min=lr * 1e-3)
+        blk_losses = []
         for s in range(steps):
             perm = torch.randperm(n)[:mb].tolist()
             opt.zero_grad()
@@ -205,6 +210,7 @@ def calibrate_perblock(model, store, dev, steps=200, mb=4, lr=5e-3, clip_lr=5e-2
                     se = wtoks[j][None, :, None] * se       # per-token region weight (broadcast over channels)
                 loss = loss + (se.mean() if cbw is None else (cbw * se).mean())
             loss = loss / len(perm)
+            blk_losses.append(float(loss.detach()))
             (loss / loss.detach().clamp(min=1e-12)).backward()
             opt.step(); sched.step()
             for w in ws:
@@ -222,9 +228,20 @@ def calibrate_perblock(model, store, dev, steps=200, mb=4, lr=5e-3, clip_lr=5e-2
             inps = fp_outs
         del fp_outs, opt
         torch.cuda.empty_cache()
-        if (bi + 1) % 4 == 0 or bi == len(blocks) - 1:
-            print(f"[pb]  block {bi+1}/{len(blocks)} ({time.time()-t0:.0f}s)")
+        k = min(20, len(blk_losses))
+        stats.append({"block": bi, "loss_first": blk_losses[0],
+                      "loss_last": sum(blk_losses[-k:]) / k, "loss_min": min(blk_losses)})
+        print(f"[pb]  block {bi+1}/{len(blocks)} loss {stats[-1]['loss_first']:.3e}"
+              f"->{stats[-1]['loss_last']:.3e} ({time.time()-t0:.0f}s)")
     print(f"[pb] done in {time.time()-t0:.0f}s")
+    if stats_out:
+        payload = {"meta": stats_meta or {}, "blocks": stats,
+                   "sum_loss_last": sum(b["loss_last"] for b in stats),
+                   "sum_loss_first": sum(b["loss_first"] for b in stats)}
+        os.makedirs(os.path.dirname(stats_out) or ".", exist_ok=True)
+        with open(stats_out, "w") as f:
+            json.dump(payload, f, indent=2)
+        print(f"[pb] block-loss stats -> {stats_out}")
     return model
 
 
@@ -323,7 +340,13 @@ def main():
                            lr=args.lr, clip_lr=args.clip_lr, loss_type=args.loss,
                            region_gen_w=args.region_gen_w, region_prompt_w=args.region_prompt_w,
                            drift=args.drift, diag_alpha=args.diag_alpha,
-                           diag_init=not args.no_diag_init and not args.no_diag)
+                           diag_init=not args.no_diag_init and not args.no_diag,
+                           stats_out=os.path.join(genroot, "calib_block_losses.json"),
+                           stats_meta={"calib_lst": str(calib_lst), "calib_seed": args.calib_seed,
+                                       "steps": args.steps, "mb": args.mb,
+                                       "max_seqs": args.max_seqs, "per_item_keep": args.per_item_keep,
+                                       "loss": args.loss, "model_dir": args.model_dir,
+                                       "n_calib_items": len(calib), "n_seqs": len(store)})
         if args.save_model:
             os.makedirs(os.path.dirname(model_path) or ".", exist_ok=True)
             torch.save(model, model_path)
