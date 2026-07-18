@@ -55,5 +55,5 @@ fresh (and step-axis / deploy tooling that loads bc_*.pt keeps working — old p
 
 1. delete `models/svd_*.pt` (legacy one-shot/asym calibration)
 2. recalibrate FlatQuant canonical models under the new defaults (or pass legacy flags to reproduce)
-3. QuaRot-GPTQ canonical models: `bash scripts/benchmark_quarot_gptq_seedtts.sh` creates `models/qgptq_*.pt`
+3. QuaRot-GPTQ canonical models: `bash scripts/benchmark/benchmark_quarot_gptq_seedtts.sh` creates `models/qgptq_*.pt`
 4. keep legacy rows (quarot-RTN, svd one-shot, flatquant-drift) as labeled ablations, not headline numbers

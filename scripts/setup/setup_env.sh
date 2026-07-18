@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT_DIR"
 
 WITH_ASSETS="${WITH_ASSETS:-1}"
@@ -94,7 +94,7 @@ install_python_deps() {
   drv="$(detect_driver_cuda || true)"
   idx="$(pick_torch_index "$drv")"
   log "driver CUDA: ${drv:-unknown}, installing torch stack from $idx"
-  "$PYTHON_BIN" -m pip install --upgrade --index-url "$idx" torch==2.12.0 torchaudio==2.11.0
+  # "$PYTHON_BIN" -m pip install --upgrade --index-url "$idx" torch==2.12.0 torchaudio==2.11.0
 }
 
 clone_if_missing() {
@@ -185,13 +185,13 @@ setup_repos_and_kernels() {
 
 run_preflight() {
   log "running preflight"
-  bash scripts/preflight_env.sh
+  bash scripts/setup/preflight_env.sh
 }
 
 install_assets_if_requested() {
   if [ "$WITH_ASSETS" = "1" ]; then
     log "installing Seed-TTS eval assets"
-    bash scripts/download_seedtts_testset.sh
+    bash scripts/setup/download_seedtts_testset.sh
   else
     log "skipping asset install (WITH_ASSETS=$WITH_ASSETS)"
   fi

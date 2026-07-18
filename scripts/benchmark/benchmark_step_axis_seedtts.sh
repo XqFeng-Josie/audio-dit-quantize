@@ -14,13 +14,13 @@
 # calibration — that identity is the whole point of the control. Produce it once with MODE=calibrate.
 #
 # REQUIRED before the ΔSIM bootstrap: run flatquant_best WITH per-item SIM to make the baseline, e.g.
-#   EVAL_METRICS="wer cer mos sim" bash scripts/benchmark_flatquant_best_seedtts.sh 1b
+#   EVAL_METRICS="wer cer mos sim" bash scripts/benchmark/benchmark_flatquant_best_seedtts.sh 1b
 # (override the baseline metric prefix with BASELINE_PREFIX; default flat_best / flat_best_3.5b).
 #
 # Usage:
-#   bash scripts/benchmark_step_axis_seedtts.sh [1b|3.5b|both] ["zh en hard"] ["early late"]
-#   MODE=calibrate bash scripts/benchmark_step_axis_seedtts.sh 1b        # one-time: produce the fixed model
-#   LIMIT=50 bash scripts/benchmark_step_axis_seedtts.sh 1b hard "late"  # quick smoke
+#   bash scripts/benchmark/benchmark_step_axis_seedtts.sh [1b|3.5b|both] ["zh en hard"] ["early late"]
+#   MODE=calibrate bash scripts/benchmark/benchmark_step_axis_seedtts.sh 1b        # one-time: produce the fixed model
+#   LIMIT=50 bash scripts/benchmark/benchmark_step_axis_seedtts.sh 1b hard "late"  # quick smoke
 # Env: LIMIT=0 (items/set; 0=full)  BASE=1024 (per-item seed)  DEVICE=cuda:0  MODE=calibrate (produce model)
 #      BASELINE_PREFIX=flat_best  (metric prefix of the "full" W4A4 baseline; _3.5b auto-appended for 3.5B)
 #
@@ -30,7 +30,7 @@
 # Model-scoped paths keep 1B and 3.5B from colliding (skip-existing would otherwise make the second
 # model reuse the first model's cached wavs, and result files would overwrite each other).
 set -euo pipefail
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 source "$ROOT_DIR/env.sh"
 source "$ROOT_DIR/scripts/gpu_parallel.sh"   # GPU-range knob + item-shard fan-out (calibration stays single-GPU)
 cd "$ROOT_DIR"
@@ -83,7 +83,7 @@ run_model() {
       A="$SEED_RESULTS_DIR/${base_prefix}_${s}_sim.txt"; B="$SEED_RESULTS_DIR/step_${c}${TAG}_${s}_sim.txt"
       if [ ! -f "$A" ]; then
         echo "  [$which $s: $c] SKIP — baseline per-item SIM $A missing." >&2
-        echo "        produce it with: EVAL_METRICS=\"wer cer mos sim\" bash scripts/benchmark_flatquant_best_seedtts.sh $which" >&2
+        echo "        produce it with: EVAL_METRICS=\"wer cer mos sim\" bash scripts/benchmark/benchmark_flatquant_best_seedtts.sh $which" >&2
         continue
       fi
       if [ -f "$B" ]; then

@@ -6,10 +6,10 @@
 #    contention-sensitive). Each config runs sequentially; output-validity guard flags degenerate (NaN/zero) runs.
 #
 # Usage:
-#   bash scripts/benchmark_efficiency.sh [1b|3.5b|both] [N]
+#   bash scripts/benchmark/benchmark_efficiency.sh [1b|3.5b|both] [N]
 # Examples:
-#   bash scripts/benchmark_efficiency.sh 1b           # 1B, N=10
-#   bash scripts/benchmark_efficiency.sh both 10      # 1B + 3.5B
+#   bash scripts/benchmark/benchmark_efficiency.sh 1b           # 1B, N=10
+#   bash scripts/benchmark/benchmark_efficiency.sh both 10      # 1B + 3.5B
 #
 # Configs per model (quant × execution mode):
 #   fp32 / fp16 / W4A4-fp16glue  × {eager, cudagraph-only, compile+cudagraph}
@@ -18,7 +18,7 @@
 #
 # Outputs: results/eff/<model>_<config>.txt (full profiler output) + results/eff/progress.log
 set -euo pipefail
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 source "$ROOT_DIR/env.sh"
 
 WHICH="${1:-1b}"; N="${2:-10}"

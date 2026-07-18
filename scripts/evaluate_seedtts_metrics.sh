@@ -185,7 +185,7 @@ score_mos_metrics() {
 # Fail early (before any heavy ASR/MOS work) if SIM is requested but the WavLM checkpoint is absent.
 if want_metric sim && [ ! -f "${WAVLM_CKPT:-}" ]; then
   echo "[metrics] ERROR: SIM requested but WavLM checkpoint not found: ${WAVLM_CKPT:-<unset>}" >&2
-  echo "        get it with: bash scripts/download_seedtts_testset.sh   (or export WAVLM_CKPT=/path/to/wavlm_large_finetune.pth)" >&2
+  echo "        get it with: bash scripts/setup/download_seedtts_testset.sh   (or export WAVLM_CKPT=/path/to/wavlm_large_finetune.pth)" >&2
   echo "        or drop SIM:  EVAL_METRICS=\"wer cer mos\" bash scripts/evaluate_seedtts_metrics.sh ..." >&2
   exit 1
 fi
@@ -194,11 +194,18 @@ run_set() {
   local setname="$1" gpu="${2:-}"
   local meta lang text_metric metric_suffix
   case "$setname" in
-    zh)   meta="$SEED_DATA_DIR/zh/meta.lst";     lang=zh; text_metric=cer; metric_suffix=zh_cer ;;
-    en)   meta="$SEED_DATA_DIR/en/meta.lst";     lang=en; text_metric=wer; metric_suffix=en_wer ;;
-    hard) meta="$SEED_DATA_DIR/zh/hardcase.lst"; lang=zh; text_metric=cer; metric_suffix=hard_cer ;;
-    *) echo "[metrics] unknown set: $setname" >&2; exit 2 ;;
+    zh)            meta="$SEED_DATA_DIR/zh/meta.lst";              lang=zh; text_metric=cer ;;
+    en)            meta="$SEED_DATA_DIR/en/meta.lst";              lang=en; text_metric=wer ;;
+    hard)          meta="$SEED_DATA_DIR/zh/hardcase.lst";          lang=zh; text_metric=cer ;;
+    zh_dev)        meta="$SEED_DATA_DIR/zh/meta_dev.lst";          lang=zh; text_metric=cer ;;
+    en_dev)        meta="$SEED_DATA_DIR/en/meta_dev.lst";          lang=en; text_metric=wer ;;
+    hard_dev)      meta="$SEED_DATA_DIR/zh/hardcase_dev.lst";      lang=zh; text_metric=cer ;;
+    zh_heldtest)   meta="$SEED_DATA_DIR/zh/meta_heldtest.lst";     lang=zh; text_metric=cer ;;
+    en_heldtest)   meta="$SEED_DATA_DIR/en/meta_heldtest.lst";     lang=en; text_metric=wer ;;
+    hard_heldtest) meta="$SEED_DATA_DIR/zh/hardcase_heldtest.lst"; lang=zh; text_metric=cer ;;
+    *) echo "[metrics] unknown set: $setname (frozen dev/heldtest splits: python -m audio_dit_quantize.calib.dev_split)" >&2; exit 2 ;;
   esac
+  metric_suffix="${setname}_${text_metric}"
   local gen_dir="$gen_root/$setname"
   [ -d "$gen_dir" ] || { echo "[metrics] missing generated dir: $gen_dir" >&2; exit 1; }
 

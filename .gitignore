@@ -7,6 +7,9 @@ eval/seed-tts-eval/
 eval/ckpt/
 vendor/*
 data/*
+# frozen dev/heldtest uid manifests (small, MUST be committed — freeze semantics)
+!data/splits/
+!data/splits/**
 
 gen/
 logs/

@@ -6,7 +6,7 @@ IDENTICAL noise -> clean paired comparison (noise + order removed as confounds).
 
 modes: fp32 | int8 (W8A8) | rtn (naive W4A4) | svdquant (W4A4) | quarot (W4A4 Hadamard, training-free)
       | quarot_gptq (W4A4 Hadamard + GPTQ weights, the QuaRot paper-best config)
-SVDQuant / QuaRot-GPTQ calibration always uses data/calib_heldout_hardlike32.lst.
+SVDQuant / QuaRot-GPTQ calibration uses --calib_lst (default: SEED_CALIB_LST env or paths.CALIB_LST).
 
 Usage:
   python -m audio_dit_quantize.generate_seedtts --mode fp32 --tag fp32 --base 1024
@@ -36,7 +36,7 @@ def _valid_wav(wav):
 
 
 def prep(mode, model, tok, dev, rank, calib_seed, w_clip_ratio=1.0,
-         svd_rows=2048, svd_iters=None, svd_asym=False):
+         svd_rows=2048, svd_iters=None, svd_asym=False, calib_lst=None):
     if mode == "fp32":
         return
     if mode == "int8":
@@ -61,7 +61,7 @@ def prep(mode, model, tok, dev, rank, calib_seed, w_clip_ratio=1.0,
             torch.manual_seed(calib_seed)
             torch.cuda.manual_seed_all(calib_seed)
             print(f"[prep] quarot_gptq calibration pinned to seed {calib_seed}", flush=True)
-        calib = rs.load_calib_items()
+        calib = rs.load_calib_items(calib_lst)
         store = capture_block_inputs(model, tok, dev, calib, max_seqs=64, per_item_keep=2)
         print(f"[quarot_gptq] captured {len(store)} sequences", flush=True)
         wrapped = qr.wrap_dit(model, w_bits=4, a_bits=4, w_clip_ratio=w_clip_ratio, freeze=False)
@@ -73,7 +73,7 @@ def prep(mode, model, tok, dev, rank, calib_seed, w_clip_ratio=1.0,
             torch.manual_seed(calib_seed)
             torch.cuda.manual_seed_all(calib_seed)
             print(f"[prep] svdquant calibration pinned to seed {calib_seed}", flush=True)
-        calib = rs.load_calib_items()
+        calib = rs.load_calib_items(calib_lst)
         from .svdquant_linear import NUM_ITERS
         rs.calibrate(model, tok, dev, calib, svd_rows, rank, a_bits=4,
                      num_iters=svd_iters if svd_iters is not None else NUM_ITERS,
@@ -99,6 +99,8 @@ def main():
                     help="[svdquant] legacy per-group ASYMMETRIC act quant (paper-best/deployable is symmetric)")
     ap.add_argument("--calib_seed", type=int, default=None,
                     help="pin quant calibration randomness; None leaves calibration RNG uncontrolled")
+    ap.add_argument("--calib_lst", default=None,
+                    help="quant-calibration list path (default: SEED_CALIB_LST env or paths.CALIB_LST)")
     ap.add_argument("--nfe", type=int, default=16, help="ODE time points; forwards=2*(nfe-1) under CFG/APG")
     ap.add_argument("--guidance", default="apg", choices=["cfg", "apg"])
     ap.add_argument("--cfg_strength", type=float, default=4.0)
@@ -135,7 +137,8 @@ def main():
         model.vae.to_half(); model.eval()
         tok = AutoTokenizer.from_pretrained(model.config.text_encoder_model)
         prep(args.mode, model, tok, dev, args.rank, args.calib_seed, args.w_clip_ratio,
-             svd_rows=args.svd_rows, svd_iters=args.svd_iters, svd_asym=args.svd_asym)
+             svd_rows=args.svd_rows, svd_iters=args.svd_iters, svd_asym=args.svd_asym,
+             calib_lst=args.calib_lst)
         if calibrated_mode and (args.save_model or args.calibrate_only):
             os.makedirs(os.path.dirname(model_path) or ".", exist_ok=True)
             torch.save(model, model_path)

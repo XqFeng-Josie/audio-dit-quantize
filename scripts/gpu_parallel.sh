@@ -39,12 +39,19 @@ gpu_pool() {
 }
 
 # Echo the meta list path for a Seed set (used to count items for sharding).
+# *_dev / *_heldtest = the frozen splits (python -m audio_dit_quantize.calib.dev_split).
 set_meta() {
   case "$1" in
-    zh)   echo "$SEED_DATA_DIR/zh/meta.lst" ;;
-    en)   echo "$SEED_DATA_DIR/en/meta.lst" ;;
-    hard) echo "$SEED_DATA_DIR/zh/hardcase.lst" ;;
-    *)    echo ""; return 1 ;;
+    zh)            echo "$SEED_DATA_DIR/zh/meta.lst" ;;
+    en)            echo "$SEED_DATA_DIR/en/meta.lst" ;;
+    hard)          echo "$SEED_DATA_DIR/zh/hardcase.lst" ;;
+    zh_dev)        echo "$SEED_DATA_DIR/zh/meta_dev.lst" ;;
+    en_dev)        echo "$SEED_DATA_DIR/en/meta_dev.lst" ;;
+    hard_dev)      echo "$SEED_DATA_DIR/zh/hardcase_dev.lst" ;;
+    zh_heldtest)   echo "$SEED_DATA_DIR/zh/meta_heldtest.lst" ;;
+    en_heldtest)   echo "$SEED_DATA_DIR/en/meta_heldtest.lst" ;;
+    hard_heldtest) echo "$SEED_DATA_DIR/zh/hardcase_heldtest.lst" ;;
+    *)             echo ""; return 1 ;;
   esac
 }
 

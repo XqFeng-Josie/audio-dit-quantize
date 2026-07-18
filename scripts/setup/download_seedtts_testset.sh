@@ -9,12 +9,12 @@
 #   eval/ckpt/wavlm_large_finetune.pth                 # only needed when running SIM
 #
 # Usage:
-#   bash scripts/download_seedtts_testset.sh
+#   bash scripts/setup/download_seedtts_testset.sh
 #
 # Fast local install when another repo already has the assets:
 #   SOURCE_DIR=/home/xiaoqin_feng/workspace/seed_repro/data/seedtts_testset \
 #   WAVLM_SOURCE=/home/xiaoqin_feng/workspace/seed_repro/eval/ckpt/wavlm_large_finetune.pth \
-#     bash scripts/download_seedtts_testset.sh
+#     bash scripts/setup/download_seedtts_testset.sh
 #
 # Google Drive sources:
 #   Seed-TTS test set: 1GlSjVfSHkW3-leKKBlfrjuuTGqQ_xaLP
@@ -27,7 +27,7 @@
 #   FORCE=1                                  reinstall even if target exists
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 source "$ROOT_DIR/env.sh"
 
 seedtts_file_id="1GlSjVfSHkW3-leKKBlfrjuuTGqQ_xaLP"

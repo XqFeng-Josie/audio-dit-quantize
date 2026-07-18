@@ -10,7 +10,7 @@ aware), which imports ``load_calib_items`` / ``calibrate`` / ``load_items`` / ``
 A100 = fake-quant quality study (Nunchaku INT4 kernels would give real speed; not wired here).
 
 Note: SVDQuant re-calibrates in-process and has no model save/load, so its generation is single-GPU
-(item sharding would recalibrate per shard); see scripts/benchmark_svdquant_seedtts.sh.
+(item sharding would recalibrate per shard); see scripts/benchmark/benchmark_svdquant_seedtts.sh.
 """
 import os, time
 import torch
@@ -34,11 +34,13 @@ def load_items(lst):
     return out
 
 
-def load_calib_items():
-    if not CALIB_LST.exists():
-        raise FileNotFoundError(f"fixed calibration list not found: {CALIB_LST}")
-    calib = load_items(CALIB_LST)
-    print(f"[calib] list = {len(calib)} items from {CALIB_LST}")
+def load_calib_items(calib_lst=None):
+    lst = str(calib_lst) if calib_lst else str(CALIB_LST)
+    if not os.path.exists(lst):
+        raise FileNotFoundError(f"calibration list not found: {lst} "
+                                "(pass --calib_lst or set SEED_CALIB_LST)")
+    calib = load_items(lst)
+    print(f"[calib] list = {len(calib)} items from {lst}")
     return calib
 
 

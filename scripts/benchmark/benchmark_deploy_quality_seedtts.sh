@@ -9,12 +9,12 @@
 # int4 GEMM itself is integer-exact; quality is decided entirely by glue precision.
 #
 # Usage:
-#   bash scripts/benchmark_deploy_quality_seedtts.sh [1b|3.5b|both] [zh,en,hard] [fp32,fp16]
+#   bash scripts/benchmark/benchmark_deploy_quality_seedtts.sh [1b|3.5b|both] [zh,en,hard] [fp32,fp16]
 # Examples:
-#   bash scripts/benchmark_deploy_quality_seedtts.sh both hard              # both models, Hard, both glues
-#   bash scripts/benchmark_deploy_quality_seedtts.sh 1b  "zh en hard"       # 1B, full-set
-#   bash scripts/benchmark_deploy_quality_seedtts.sh 3.5b hard fp32         # 3.5B, Hard, fp32-glue only (准档)
-#   LIMIT=8 bash scripts/benchmark_deploy_quality_seedtts.sh 1b hard        # quick smoke
+#   bash scripts/benchmark/benchmark_deploy_quality_seedtts.sh both hard              # both models, Hard, both glues
+#   bash scripts/benchmark/benchmark_deploy_quality_seedtts.sh 1b  "zh en hard"       # 1B, full-set
+#   bash scripts/benchmark/benchmark_deploy_quality_seedtts.sh 3.5b hard fp32         # 3.5B, Hard, fp32-glue only (准档)
+#   LIMIT=8 bash scripts/benchmark/benchmark_deploy_quality_seedtts.sh 1b hard        # quick smoke
 #
 # Env knobs:
 #   LIMIT=0            items per set (0 = full set)
@@ -28,10 +28,10 @@
 # Naming convention (aligned across all quality benchmarks):
 #   gen wavs -> gen/paired/<tag>/<set>/*.wav ; metrics -> results/<tag>_<set>_<metric>.txt
 #   tag = dep_<glue> (1B) / dep_3.5b_<glue> (3.5B), e.g. dep_fp32, dep_3.5b_fp16.
-# Required data/ckpt: same as benchmark_fp32_seedtts.sh (bash scripts/download_seedtts_testset.sh).
+# Required data/ckpt: same as benchmark_fp32_seedtts.sh (bash scripts/setup/download_seedtts_testset.sh).
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 source "$ROOT_DIR/env.sh"
 source "$ROOT_DIR/scripts/gpu_parallel.sh"   # GPU-range knob + item-shard fan-out (loads a fixed bc_*.pt)
 cd "$SEED_REPRO_DIR"
@@ -80,7 +80,7 @@ case "$which_model" in
     run_model 3.5B meituan-longcat/LongCat-AudioDiT-3.5B 3.5b
     ;;
   *)
-    echo "usage: bash scripts/benchmark_deploy_quality_seedtts.sh [1b|3.5b|both] [zh,en,hard] [fp32,fp16]" >&2
+    echo "usage: bash scripts/benchmark/benchmark_deploy_quality_seedtts.sh [1b|3.5b|both] [zh,en,hard] [fp32,fp16]" >&2
     exit 2
     ;;
 esac

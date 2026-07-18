@@ -16,14 +16,15 @@
 #   3. Automatically evaluate generated wavs with scripts/evaluate_seedtts_metrics.sh.
 #
 # Usage:
-#   bash scripts/benchmark_quarot_gptq_seedtts.sh [1b|3.5b|both] [zh,en,hard]
+#   bash scripts/benchmark/benchmark_quarot_gptq_seedtts.sh [1b|3.5b|both] [zh,en,hard]
 # Examples:
-#   bash scripts/benchmark_quarot_gptq_seedtts.sh 1b "zh en hard"
-#   GPUS=0,1,2,3 bash scripts/benchmark_quarot_gptq_seedtts.sh 1b "zh en hard"
-#   LIMIT=1 bash scripts/benchmark_quarot_gptq_seedtts.sh 1b hard
+#   bash scripts/benchmark/benchmark_quarot_gptq_seedtts.sh 1b "zh en hard"
+#   GPUS=0,1,2,3 bash scripts/benchmark/benchmark_quarot_gptq_seedtts.sh 1b "zh en hard"
+#   LIMIT=1 bash scripts/benchmark/benchmark_quarot_gptq_seedtts.sh 1b hard
 #
 # Common env knobs:
 #   CALIB_SEED=0        calibration RNG seed        (⚠ baked into qgptq_*.pt; delete the .pt to change it)
+#   SEED_CALIB_LST=...  calibration list path (REQUIRED since the legacy default list was deleted 2026-07-18)
 #   BASE=1024           per-item generation seed base
 #   LIMIT=0             items per set; 0 means full set
 #   GPUS=0,1,2,3        GPUs for item-sharded generation + parallel eval (calibration stays single-GPU)
@@ -32,10 +33,10 @@
 # Naming convention (aligned across all quality benchmarks):
 #   gen wavs -> gen/paired/<tag>/<set>/*.wav ; metrics -> results/<tag>_<set>_<metric>.txt
 #   gen tag == metric prefix; 3.5B adds the _3.5b suffix (tag=quarot_gptq / quarot_gptq_3.5b).
-# Required data/ckpt: same as benchmark_fp32_seedtts.sh (bash scripts/download_seedtts_testset.sh).
+# Required data/ckpt: same as benchmark_fp32_seedtts.sh (bash scripts/setup/download_seedtts_testset.sh).
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 source "$ROOT_DIR/env.sh"
 source "$ROOT_DIR/scripts/gpu_parallel.sh"   # GPU-range knob (GPUS/CUDA_VISIBLE_DEVICES); eval parallelizes
 cd "$SEED_REPRO_DIR"
@@ -86,7 +87,7 @@ case "$which_model" in
     run_one 3.5B meituan-longcat/LongCat-AudioDiT-3.5B quarot_gptq_3.5b "$SEED_MODELS_DIR/qgptq_3p5b_model.pt"
     ;;
   *)
-    echo "usage: bash scripts/benchmark_quarot_gptq_seedtts.sh [1b|3.5b|both] [zh,en,hard]" >&2
+    echo "usage: bash scripts/benchmark/benchmark_quarot_gptq_seedtts.sh [1b|3.5b|both] [zh,en,hard]" >&2
     exit 2
     ;;
 esac

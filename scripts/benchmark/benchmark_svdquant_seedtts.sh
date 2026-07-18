@@ -9,12 +9,12 @@
 #   3. Automatically evaluate generated wavs with scripts/evaluate_seedtts_metrics.sh.
 #
 # Usage:
-#   bash scripts/benchmark_svdquant_seedtts.sh [1b|3.5b|both] [zh,en,hard]
+#   bash scripts/benchmark/benchmark_svdquant_seedtts.sh [1b|3.5b|both] [zh,en,hard]
 # Examples:
-#   bash scripts/benchmark_svdquant_seedtts.sh 1b "zh en hard"
-#   GPUS=0,1,2,3 bash scripts/benchmark_svdquant_seedtts.sh 1b "zh en hard"   # calibrate 1 GPU, gen 4-way
-#   LIMIT=1 RANK=32 bash scripts/benchmark_svdquant_seedtts.sh 1b hard
-#   EVAL_METRICS="wer cer mos sim" bash scripts/benchmark_svdquant_seedtts.sh 1b "zh en hard"
+#   bash scripts/benchmark/benchmark_svdquant_seedtts.sh 1b "zh en hard"
+#   GPUS=0,1,2,3 bash scripts/benchmark/benchmark_svdquant_seedtts.sh 1b "zh en hard"   # calibrate 1 GPU, gen 4-way
+#   LIMIT=1 RANK=32 bash scripts/benchmark/benchmark_svdquant_seedtts.sh 1b hard
+#   EVAL_METRICS="wer cer mos sim" bash scripts/benchmark/benchmark_svdquant_seedtts.sh 1b "zh en hard"
 #
 # Default eval metrics: zh/hard -> CER, en -> WER; plus MOS (UTMOS + DNSMOS) + WavLM SIM on all sets.
 #   (SIM needs eval/ckpt/wavlm_large_finetune.pth; override with e.g. EVAL_METRICS="wer cer mos".)
@@ -22,6 +22,7 @@
 # Common env knobs:
 #   RANK=32             SVD low-rank residual rank  (⚠ baked into svd_*.pt; delete the .pt to change it)
 #   CALIB_SEED=0        calibration RNG seed        (⚠ baked into svd_*.pt; delete the .pt to change it)
+#   SEED_CALIB_LST=...  calibration list path (REQUIRED since the legacy default list was deleted 2026-07-18)
 #   SVD_ROWS=2048       calib activation rows per linear (legacy runs used 512; ⚠ baked into svd_*.pt)
 #   SVD_ITERS=          low-rank refinement iters; empty = paper-best 100 w/ early stop, 1 = legacy
 #                       one-shot ablation (⚠ baked into svd_*.pt)
@@ -39,10 +40,10 @@
 # Required data:
 #   data/seedtts_testset/zh/meta.lst and data/seedtts_testset/en/meta.lst
 #   eval/ckpt/wavlm_large_finetune.pth when running SIM
-#   Install with: bash scripts/download_seedtts_testset.sh
+#   Install with: bash scripts/setup/download_seedtts_testset.sh
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 source "$ROOT_DIR/env.sh"
 source "$ROOT_DIR/scripts/gpu_parallel.sh"   # GPU-range knob (GPUS/CUDA_VISIBLE_DEVICES); eval parallelizes
 cd "$SEED_REPRO_DIR"
@@ -96,7 +97,7 @@ case "$which_model" in
     run_one 3.5B meituan-longcat/LongCat-AudioDiT-3.5B svd_3.5b "$SEED_MODELS_DIR/svd_3p5b_model.pt"
     ;;
   *)
-    echo "usage: bash scripts/benchmark_svdquant_seedtts.sh [1b|3.5b|both] [zh,en,hard]" >&2
+    echo "usage: bash scripts/benchmark/benchmark_svdquant_seedtts.sh [1b|3.5b|both] [zh,en,hard]" >&2
     exit 2
     ;;
 esac

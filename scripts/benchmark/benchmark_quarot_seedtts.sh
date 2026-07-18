@@ -9,12 +9,12 @@
 #   2. Evaluate with scripts/evaluate_seedtts_metrics.sh.
 #
 # Usage:
-#   bash scripts/benchmark_quarot_seedtts.sh [1b|3.5b|both] [zh,en,hard]
+#   bash scripts/benchmark/benchmark_quarot_seedtts.sh [1b|3.5b|both] [zh,en,hard]
 # Examples:
-#   bash scripts/benchmark_quarot_seedtts.sh 1b "zh en hard"
-#   LIMIT=1 bash scripts/benchmark_quarot_seedtts.sh 1b hard
-#   EVAL_METRICS="wer cer mos sim" bash scripts/benchmark_quarot_seedtts.sh both "zh en hard"
-#   W_CLIP_RATIO=0.9 bash scripts/benchmark_quarot_seedtts.sh 1b hard        # QuaRot-style weight clip
+#   bash scripts/benchmark/benchmark_quarot_seedtts.sh 1b "zh en hard"
+#   LIMIT=1 bash scripts/benchmark/benchmark_quarot_seedtts.sh 1b hard
+#   EVAL_METRICS="wer cer mos sim" bash scripts/benchmark/benchmark_quarot_seedtts.sh both "zh en hard"
+#   W_CLIP_RATIO=0.9 bash scripts/benchmark/benchmark_quarot_seedtts.sh 1b hard        # QuaRot-style weight clip
 #
 # Default eval metrics: zh/hard -> CER, en -> WER; plus MOS (UTMOS + DNSMOS) + WavLM SIM on all sets.
 #   (SIM needs eval/ckpt/wavlm_large_finetune.pth; override with e.g. EVAL_METRICS="wer cer mos".)
@@ -25,10 +25,10 @@
 # Naming convention (aligned across all quality benchmarks):
 #   gen wavs -> gen/paired/<tag>/<set>/*.wav ; metrics -> results/<tag>_<set>_<metric>.txt
 #   gen tag == metric prefix; 3.5B adds the _3.5b suffix (tag=quarot / quarot_3.5b).
-# Required data/ckpt: same as benchmark_fp32_seedtts.sh (bash scripts/download_seedtts_testset.sh).
+# Required data/ckpt: same as benchmark_fp32_seedtts.sh (bash scripts/setup/download_seedtts_testset.sh).
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 source "$ROOT_DIR/env.sh"
 source "$ROOT_DIR/scripts/gpu_parallel.sh"   # GPU-range knob (GPUS/CUDA_VISIBLE_DEVICES) + item-shard fan-out
 cd "$SEED_REPRO_DIR"
@@ -69,7 +69,7 @@ case "$which_model" in
     run_one 3.5B meituan-longcat/LongCat-AudioDiT-3.5B quarot_3.5b
     ;;
   *)
-    echo "usage: bash scripts/benchmark_quarot_seedtts.sh [1b|3.5b|both] [zh,en,hard]" >&2
+    echo "usage: bash scripts/benchmark/benchmark_quarot_seedtts.sh [1b|3.5b|both] [zh,en,hard]" >&2
     exit 2
     ;;
 esac

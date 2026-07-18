@@ -274,6 +274,8 @@ def main():
     ap.add_argument("--no_diag", action="store_true")
     ap.add_argument("--base", type=int, default=1024,
                     help="per-item seed = base + idx (order-free protocol; pairs with fp32/flat gens)")
+    ap.add_argument("--calib_lst", default=None,
+                    help="quant-calibration list path (default: SEED_CALIB_LST env or paths.CALIB_LST)")
     ap.add_argument("--calib_seed", type=int, default=None,
                     help="pin the calibration draw (capture noise + training randperm) for reproducibility; "
                          "None = uncontrolled RNG (legacy behaviour). Set it so zh/en/hard from one launch share one calib.")
@@ -304,10 +306,12 @@ def main():
         if args.calib_seed is not None:
             torch.manual_seed(args.calib_seed); torch.cuda.manual_seed_all(args.calib_seed)
             print(f"[pb] calibration pinned to seed {args.calib_seed}")
-        if not CALIB_LST.exists():
-            raise FileNotFoundError(f"fixed calibration list not found: {CALIB_LST}")
-        calib = load_items(CALIB_LST)
-        print(f"[pb] calib = {len(calib)} items from {CALIB_LST}")
+        calib_lst = args.calib_lst or str(CALIB_LST)
+        if not os.path.exists(calib_lst):
+            raise FileNotFoundError(f"calibration list not found: {calib_lst} "
+                                    "(pass --calib_lst or set SEED_CALIB_LST)")
+        calib = load_items(calib_lst)
+        print(f"[pb] calib = {len(calib)} items from {calib_lst}")
         print(f"[pb] capturing block-0 activations on {len(calib)} prompts ...")
         store = capture_block_inputs(model, tok, dev, calib, args.max_seqs, args.per_item_keep)
         print(f"[pb] captured {len(store)} sequences")

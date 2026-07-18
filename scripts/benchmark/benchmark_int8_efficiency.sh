@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Measure LongCat-AudioDiT REAL INT8 (torchao W8A8) deploy efficiency — the INT8 efficiency sub-story,
-# kept SEPARATE from the W4A4 main line (scripts/benchmark_efficiency.sh). See docs/efficiency.md.
+# kept SEPARATE from the W4A4 main line (scripts/benchmark/benchmark_efficiency.sh). See docs/efficiency.md.
 #
 # The whole point is to isolate TWO effects that both move latency at bs=1:
 #   (a) the COMPILE lever  — fp32-eager vs fp32-compile shows what torch.compile alone buys;
@@ -10,7 +10,7 @@
 # manual-graph path (--cudagraph) is the WRONG combo for INT8; the right cudagraph arm is
 # --compile --inductor-cudagraph (needs the rotary keystone fix, applied automatically in the profiler).
 #
-# NOTE — the fp32/fp16 configs below OVERLAP scripts/benchmark_efficiency.sh ON PURPOSE, not redundancy:
+# NOTE — the fp32/fp16 configs below OVERLAP scripts/benchmark/benchmark_efficiency.sh ON PURPOSE, not redundancy:
 # INT8 is a SEPARATE compile stack whose absolute ms must NOT be mixed with the §2A main table (doc §1.4,
 # "ratio-comparable only, within-stack"). So the INT8 ratios (INT8 vs fp32, compile-gain vs kernel-gain)
 # need fp32/fp16 DENOMINATORS measured in THIS SAME session / GPU state — you cannot borrow §2A's 677.
@@ -25,10 +25,10 @@
 #    contention-sensitive). Configs run sequentially; the output-validity guard flags NaN/zero runs.
 #
 # Usage:
-#   bash scripts/benchmark_int8_efficiency.sh [1b|3.5b|both] [N]
+#   bash scripts/benchmark/benchmark_int8_efficiency.sh [1b|3.5b|both] [N]
 # Examples:
-#   bash scripts/benchmark_int8_efficiency.sh 3.5b        # 3.5B, N=10 (the model where INT8 wins)
-#   bash scripts/benchmark_int8_efficiency.sh both 10     # full sub-story, 1B + 3.5B
+#   bash scripts/benchmark/benchmark_int8_efficiency.sh 3.5b        # 3.5B, N=10 (the model where INT8 wins)
+#   bash scripts/benchmark/benchmark_int8_efficiency.sh both 10     # full sub-story, 1B + 3.5B
 #
 # Configs per model (quant × execution mode):
 #   fp32-eager                  (original baseline; anchors the compile gain)
@@ -40,13 +40,13 @@
 # Prereq: torchao installed in the venv (the W4A4 main line does NOT need it).
 # Outputs: results/eff_int8/<model>_<config>.txt + results/eff_int8/progress.log
 set -euo pipefail
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 source "$ROOT_DIR/env.sh"
 
 WHICH="${1:-3.5b}"; N="${2:-10}"
 "$PYTHON_BIN" -c "import torchao" 2>/dev/null || {
   echo "ERROR: torchao not importable in $PYTHON_BIN — real W8A8 needs it. Install with: $PYTHON_BIN -m pip install torchao"
-  echo "       (the W4A4 main line, scripts/benchmark_efficiency.sh, does NOT depend on torchao.)"; exit 1; }
+  echo "       (the W4A4 main line, scripts/benchmark/benchmark_efficiency.sh, does NOT depend on torchao.)"; exit 1; }
 
 OUT="$SEED_RESULTS_DIR/eff_int8"; mkdir -p "$OUT"; PROG="$OUT/progress.log"; : > "$PROG"
 COMMON="--guidance_method apg --steps 16 --runs $N --warmup 2"

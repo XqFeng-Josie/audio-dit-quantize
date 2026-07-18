@@ -37,7 +37,11 @@ FLATQUANT_REF_DIR = _resolve_env_path(
     "FLATQUANT_REF_DIR",
     SEED_REPRO_DIR / "vendor" / "flatquant_ref",
 )
-CALIB_LST = (REPO_ROOT / "data" / "calib_heldout_hardlike32.lst").resolve()
+# Default quant-calibration list. Override per-run with SEED_CALIB_LST (shell launchers) or the
+# --calib_lst flag on the python entry points. The legacy default file was DELETED 2026-07-18
+# (test-set component contamination, see docs/experiments.md §5.3) — new experiments must pass an
+# explicit list built from the clean candidate pool.
+CALIB_LST = _resolve_env_path("SEED_CALIB_LST", REPO_ROOT / "data" / "calib_heldout_hardlike32.lst")
 
 # ONE canonical location for the fixed best-config calibration models, shared by every script that loads
 # them (generate_step_axis, w4a4_deploy_quality, w4a4_deploy_check_numerics). Override the dir with
@@ -66,4 +70,11 @@ def svd_model_path(model_dir: str) -> Path:
     return MODELS_DIR / f"svd_{tag}_model.pt"
 
 
-SETS = {"zh": "zh/meta.lst", "en": "en/meta.lst", "hard": "zh/hardcase.lst"}
+SETS = {
+    "zh": "zh/meta.lst", "en": "en/meta.lst", "hard": "zh/hardcase.lst",
+    # frozen dev/heldtest splits (materialized by `python -m audio_dit_quantize.calib.dev_split`
+    # from the committed data/splits/ manifests; see docs/experiments.md §4.3)
+    "zh_dev": "zh/meta_dev.lst", "en_dev": "en/meta_dev.lst", "hard_dev": "zh/hardcase_dev.lst",
+    "zh_heldtest": "zh/meta_heldtest.lst", "en_heldtest": "en/meta_heldtest.lst",
+    "hard_heldtest": "zh/hardcase_heldtest.lst",
+}
