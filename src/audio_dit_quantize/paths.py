@@ -51,4 +51,19 @@ def bc_model_path(model_dir: str) -> Path:
     return MODELS_DIR / f"bc_{tag}_model.pt"
 
 
+def qgptq_model_path(model_dir: str) -> Path:
+    """Canonical calibrated QuaRot-GPTQ model path (1B -> qgptq_1b_model.pt, 3.5B -> qgptq_3p5b_model.pt).
+    Same calibrate-once/reuse pattern as svd_model_path."""
+    tag = "3p5b" if ("3.5" in model_dir or "3p5" in model_dir) else "1b"
+    return MODELS_DIR / f"qgptq_{tag}_model.pt"
+
+
+def svd_model_path(model_dir: str) -> Path:
+    """Canonical calibrated SVDQuant model path (1B -> svd_1b_model.pt, 3.5B -> svd_3p5b_model.pt).
+    Calibrate once (single-GPU) + save, then load for sharded multi-GPU generation — the same
+    calibrate-once/reuse pattern as bc_model_path, giving reproducibility + shardability."""
+    tag = "3p5b" if ("3.5" in model_dir or "3p5" in model_dir) else "1b"
+    return MODELS_DIR / f"svd_{tag}_model.pt"
+
+
 SETS = {"zh": "zh/meta.lst", "en": "en/meta.lst", "hard": "zh/hardcase.lst"}

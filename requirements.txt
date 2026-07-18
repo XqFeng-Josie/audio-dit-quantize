@@ -1,8 +1,10 @@
-# seed_repro — pinned deps (Python 3.13, A100-40GB / sm_80). Reproducible env:
-#   python3.13 -m venv .venv && source .venv/bin/activate
-#   pip install -r requirements.txt
-# NOTE: the cloned model repo (LongCat-AudioDiT) and eval/seed-tts-eval ship their own
-# requirements.txt — install those too (see README "Setup"). This file is seed_repro's own stack.
+# audio-dit-quantize — pinned project deps (Python 3.13).
+# Recommended setup for cross-machine compatibility:
+#   bash scripts/setup_env.sh
+# This script selects a torch CUDA wheel compatible with the local driver.
+# NOTE: treat this file as the source of truth for this workspace. The setup
+# script handles extra repos and patches; avoid installing eval/seed-tts-eval
+# requirements.txt directly because it can override the selected torch wheel.
 
 # --- core (also covered by the model-repo requirements; pinned here so this file is self-sufficient) ---
 # torch/torchaudio: CUDA build must match the host. If the default PyPI wheel doesn't fit your CUDA,

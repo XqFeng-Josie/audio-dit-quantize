@@ -2,12 +2,18 @@
 # Source this once per shell before running any experiment:  source env.sh
 # Sets the paths every script expects. paths.py auto-resolves data/eval/gen/results
 # under SEED_REPRO_DIR; the model code (audiodit + batch_inference) lives in the
-# EXTERNAL LongCat repo, and the int4 deploy kernels need the cu130 toolchain.
+# EXTERNAL LongCat repo.
 
 AQ="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 
 export SEED_REPRO_DIR="$AQ"                                    # this folder = data/eval/gen/results root
-export LONGCAT_DIR="${LONGCAT_DIR:-$HOME/workspace/LongCat-AudioDiT}"   # external: AudioDiTModel + batch_inference.infer_one
+if [ -z "${LONGCAT_DIR:-}" ] || [ ! -d "${LONGCAT_DIR:-}" ]; then
+  if [ -d "$AQ/../LongCat-AudioDiT" ]; then
+    export LONGCAT_DIR="$AQ/../LongCat-AudioDiT"
+  else
+    export LONGCAT_DIR="$HOME/workspace/LongCat-AudioDiT"
+  fi
+fi
 export SEED_EVAL_DIR="$AQ/eval/seed-tts-eval"                  # ASR/SIM harness (score_seedtts_asr.sh cd's here)
 export SEED_DATA_DIR="${SEED_DATA_DIR:-$AQ/data/seedtts_testset}"
 export SEED_GEN_DIR="${SEED_GEN_DIR:-$AQ/gen}"
@@ -27,9 +33,14 @@ export DEVICE="${DEVICE:-cuda:0}"
 # LongCat gives `audiodit`+`batch_inference`.
 export PYTHONPATH="$AQ/src:$AQ/vendor/flatquant_ref:$LONGCAT_DIR${PYTHONPATH:+:$PYTHONPATH}"
 
-# int4 CUTLASS deploy kernels were built against cu130 — prepend if present (override CUDA_HOME to change)
-if [ -d /usr/local/cuda-13.3 ]; then
-  export CUDA_HOME="${CUDA_HOME:-/usr/local/cuda-13.3}"
+# Pick a default CUDA_HOME if not provided: prefer the newest installed /usr/local/cuda-*
+if [ -z "${CUDA_HOME:-}" ]; then
+  CUDA_HOME_CANDIDATE="$(ls -d /usr/local/cuda-[0-9]* 2>/dev/null | sort -V | tail -n1)"
+  if [ -n "$CUDA_HOME_CANDIDATE" ] && [ -d "$CUDA_HOME_CANDIDATE" ]; then
+    export CUDA_HOME="$CUDA_HOME_CANDIDATE"
+  fi
+fi
+if [ -n "${CUDA_HOME:-}" ] && [ -d "$CUDA_HOME" ]; then
   export PATH="$CUDA_HOME/bin:$PATH"
 fi
 

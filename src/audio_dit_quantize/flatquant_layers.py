@@ -97,7 +97,14 @@ class FlatQuantLinear(nn.Module):
     def forward(self, x):
         if not self.enable_quant and not self._frozen:
             # true-fp passthrough (original weight intact pre-freeze): used to capture the
-            # full-precision block output as the per-block reconstruction target.
+            # full-precision block output as the per-block reconstruction target. Doubles as the
+            # sq_style stats pass: accumulate this linear's per-input-channel activation absmax
+            # (official _ori_forward does the same for init_diag_scale).
+            if getattr(self, "_collect_smax", False):
+                with torch.no_grad():
+                    sm = x.detach().reshape(-1, x.shape[-1]).abs().max(0)[0].float()
+                    prev = getattr(self, "_x_smax", None)
+                    self._x_smax = sm if prev is None else torch.maximum(prev, sm)
             return F.linear(x, self.linear.weight, self.linear.bias)
         if self._frozen:
             xt = self._apply_xtrans(x)
@@ -124,6 +131,25 @@ class FlatQuantLinear(nn.Module):
 
     def _apply_xtrans(self, x):
         return self.trans(x) if self.use_trans else x
+
+    def begin_smax(self):
+        """Arm activation-absmax collection for the next fp passthrough forwards (sq_style init)."""
+        self._collect_smax = True
+        self._x_smax = None
+
+    @torch.no_grad()
+    def init_diag_scale(self, alpha=0.3):
+        """Official FlatQuant sq_style diag init (train_utils.py / function_utils.get_init_scale):
+        diag_scale = w_smax^(1-α) / x_smax^α, per input channel, from the calib activation absmax
+        collected via begin_smax(). Paper-best uses diag_alpha=0.3. No-op without add_diag."""
+        self._collect_smax = False
+        x_smax = getattr(self, "_x_smax", None)
+        self._x_smax = None
+        if x_smax is None or not (self.use_trans and getattr(self.trans, "add_diag", False)):
+            return
+        w_smax = self.linear.weight.abs().max(dim=0)[0].float().clamp(min=1e-5)
+        scale = (w_smax.pow(1 - alpha) / x_smax.clamp(min=1e-5).pow(alpha)).clamp(min=1e-5)
+        self.trans.diag_scale.data = scale.to(self.trans.diag_scale)
 
     def trainable_parameters(self):
         ps = []

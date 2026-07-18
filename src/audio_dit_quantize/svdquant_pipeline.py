@@ -1,26 +1,24 @@
-"""Calibrate + generate with SVDQuant W4A4 on the LongCat-AudioDiT DiT (faithful-core, fake-quant).
+"""SVDQuant W4A4 calibration helpers for the LongCat-AudioDiT DiT (faithful-core, fake-quant).
 
-Pipeline: capture per-linear inputs across the denoising trajectory (fp model) -> wrap with
-SVDQuantLinear -> per-linear calibrate (grid-search smoothing alpha by output MSE + one-shot SVD
-low-rank + group-64 INT4) -> generate Seed sets (same infer_one + seed 1024 as everything else).
+This module is the CALIBRATION library for SVDQuant — capture per-linear inputs across the denoising
+trajectory (fp model) -> wrap with SVDQuantLinear -> per-linear calibrate (grid-search smoothing alpha
+by output MSE + one-shot SVD low-rank + group-64 INT4). See svdquant_linear.py for the method itself.
 
-See svdquant_linear.py for the method + which details match deepcompressor and which are simplified.
+Generation is NOT done here: it runs through the shared, protocol-correct entry point
+``generate_seedtts.py --mode svdquant`` (per-item seed base+idx, order-free/paired, NaN guard, GPU-range
+aware), which imports ``load_calib_items`` / ``calibrate`` / ``load_items`` / ``DATA`` / ``SETS`` below.
 A100 = fake-quant quality study (Nunchaku INT4 kernels would give real speed; not wired here).
 
-Usage:
-  python -m audio_dit_quantize.svdquant_pipeline \
-      --out_subdir svdquant_full/sq --limit 0 [--model_dir ...] [--rank 32]
+Note: SVDQuant re-calibrates in-process and has no model save/load, so its generation is single-GPU
+(item sharding would recalibrate per shard); see scripts/benchmark_svdquant_seedtts.sh.
 """
-import argparse, os, time
-import torch, soundfile as sf
+import os, time
+import torch
 from tqdm import tqdm
 
-import audiodit  # noqa
-from audiodit import AudioDiTModel
-from transformers import AutoTokenizer
 from batch_inference import infer_one
 from . import svdquant_linear as sq
-from .paths import CALIB_LST, DATA_DIR, GEN_DIR, SETS
+from .paths import CALIB_LST, DATA_DIR, SETS
 
 DATA = str(DATA_DIR)
 
@@ -69,91 +67,29 @@ def capture_inputs(model, tok, dev, calib_items, rows_per_linear):
     return store
 
 
-def calibrate(model, tok, dev, calib_items, rows_per_linear, rank, a_bits=4):
+def calibrate(model, tok, dev, calib_items, rows_per_linear, rank, a_bits=4,
+              num_iters=sq.NUM_ITERS, a_sym=True):
     print(f"[calib] capturing inputs on {len(calib_items)} prompts ...")
     store = capture_inputs(model, tok, dev, calib_items, rows_per_linear)
-    wrapped = sq.wrap_dit(model, w_bits=4, a_bits=a_bits, rank=rank)
-    print(f"[calib] wrapped {len(wrapped)} linears; SVDQuant calibrate (alpha grid + SVD) ...")
+    wrapped = sq.wrap_dit(model, w_bits=4, a_bits=a_bits, rank=rank, num_iters=num_iters, a_sym=a_sym)
+    print(f"[calib] wrapped {len(wrapped)} linears; SVDQuant calibrate "
+          f"((α,β) grid + iterative low-rank, num_iters={num_iters}, a_sym={a_sym}) ...")
     t0 = time.time()
     iterator = tqdm(wrapped, desc="svd calibrate", dynamic_ncols=True)
     for i, (parent, attr, sql) in enumerate(iterator):
         bufs = store.get(id(sql.linear), [])
         if not bufs:
-            # no captured activations -> fall back to alpha=0.5 with weight-only stats
+            # no captured activations -> degenerate fallback (identity smoothing wins the grid)
             X = torch.zeros(1, sql.in_features, device=dev)
         else:
             X = torch.cat(bufs, 0).to(dev)
         sql.calibrate(X)
         del X
         store[id(sql.linear)] = None
-        iterator.set_postfix_str(f"alpha={sql.alpha:.2f}")
+        iterator.set_postfix_str(f"a={sql.alpha:.2f} b={sql.beta:.2f}")
         if (i + 1) % 40 == 0:
             torch.cuda.empty_cache()
-            tqdm.write(f"[calib]  {i+1}/{len(wrapped)} (alpha={sql.alpha:.2f})  {time.time()-t0:.0f}s")
+            tqdm.write(f"[calib]  {i+1}/{len(wrapped)} (alpha={sql.alpha:.2f} beta={sql.beta:.2f})  {time.time()-t0:.0f}s")
     torch.cuda.empty_cache()
     print(f"[calib] done in {time.time()-t0:.0f}s")
     return model
-
-
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--out_subdir", required=True)
-    ap.add_argument("--model_dir", default="meituan-longcat/LongCat-AudioDiT-1B")
-    ap.add_argument("--limit", type=int, default=0)
-    ap.add_argument("--calib_rows", type=int, default=512)
-    ap.add_argument("--calib_seed", type=int, default=None,
-                    help="pin calibration inference and activation-row sampling; None leaves RNG uncontrolled")
-    ap.add_argument("--rank", type=int, default=32)
-    ap.add_argument("--a_bits", type=int, default=4, help="activation bits (4=W4A4 default, 8=W4A8)")
-    ap.add_argument("--sets", default="zh,en,hard", help="comma list of Seed sets to generate")
-    ap.add_argument("--seed", type=int, default=1024)
-    ap.add_argument("--device", default="cuda:0")
-    args = ap.parse_args()
-    dev = torch.device(args.device)
-
-    model = AudioDiTModel.from_pretrained(args.model_dir).to(dev)
-    model.vae.to_half(); model.eval()
-    tok = AutoTokenizer.from_pretrained(model.config.text_encoder_model)
-    genroot = os.path.join(str(GEN_DIR), args.out_subdir)
-
-    if args.calib_seed is not None:
-        torch.manual_seed(args.calib_seed)
-        torch.cuda.manual_seed_all(args.calib_seed)
-        print(f"[calib] pinned to seed {args.calib_seed}")
-
-    calib = load_calib_items()
-    calibrate(model, tok, dev, calib, args.calib_rows, args.rank, a_bits=args.a_bits)
-
-    torch.manual_seed(args.seed); torch.cuda.manual_seed(args.seed)
-    want = [s.strip() for s in args.sets.split(",") if s.strip()]
-    for name in want:
-        rel = SETS[name]
-        items = load_items(os.path.join(DATA, rel))
-        if args.limit:
-            items = items[: args.limit]
-        outdir = os.path.join(genroot, name)
-        os.makedirs(outdir, exist_ok=True)
-        t0 = time.time()
-        iterator = tqdm(
-            enumerate(items),
-            total=len(items),
-            desc=f"gen svd/{name}",
-            dynamic_ncols=True,
-        )
-        for i, (uid, pt, pwa, gt) in iterator:
-            op = os.path.join(outdir, f"{uid}.wav")
-            if os.path.exists(op):
-                iterator.set_postfix_str("skip existing")
-                continue
-            try:
-                wav = infer_one(gt, pt, pwa, model, tok, dev, 16, 4.0, "apg")
-                sf.write(op, wav, model.config.sampling_rate)
-                iterator.set_postfix_str(uid[:32])
-            except Exception as e:
-                tqdm.write(f"[{name} {i+1}] ERR {uid}: {e}")
-        print(f"[{name}] {len(items)} items in {time.time()-t0:.0f}s -> {outdir}")
-    print("DONE")
-
-
-if __name__ == "__main__":
-    main()

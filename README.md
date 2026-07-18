@@ -2,15 +2,31 @@
 
 ## Setup
 
+Recommended (new machine / new user):
+
+```bash
+# Full setup: venv, deps, external repos, patches, FlatQuant kernel build,
+# Seed-TTS assets download, and final preflight check.
+bash scripts/setup_env.sh
+
+# If you want to skip the large dataset/ckpt download for now:
+WITH_ASSETS=0 bash scripts/setup_env.sh
+
+# Re-check environment anytime:
+bash scripts/preflight_env.sh
+```
+
+Manual steps (same logic as setup script):
+
 
 ```bash
 # 0) venv + this repo's pinned deps (single source of truth: requirements.txt)
-python3.13 -m venv .venv && source .venv/bin/activate
+python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 
 # 1) Model repo — scripts import `audiodit`/`batch_inference` from it via PYTHONPATH.
 #    Weights auto-download from HF on first use (meituan-longcat/LongCat-AudioDiT-{1B,3.5B}).
-git clone https://github.com/meituan-longcat/LongCat-AudioDiT.git ~/workspace/LongCat-AudioDiT
+git clone https://github.com/meituan-longcat/LongCat-AudioDiT.git ../LongCat-AudioDiT
 
 # 2) Eval harness + data assets (all gitignored — fetch these)
 git clone https://github.com/BytedanceSpeech/seed-tts-eval eval/seed-tts-eval
@@ -21,23 +37,29 @@ git clone --recursive https://github.com/ruikangliu/FlatQuant vendor/flatquant_r
 git -C vendor/flatquant_ref submodule update --init --recursive   # if you cloned without --recursive
 #    For CUDA-graph-correct W4A4: apply the default-stream→current-stream fix, then build the kernels.
 git -C vendor/flatquant_ref apply ../../patches/flatquant_cudagraph_stream.patch
-cd vendor/flatquant_ref && CUDA_HOME=/usr/local/cuda-13.3 python setup.py build_ext --inplace && cd ../..
+export CUDA_HOME="${CUDA_HOME:-$(ls -d /usr/local/cuda-[0-9]* 2>/dev/null | sort -V | tail -n1)}"
+cd vendor/flatquant_ref && ../../.venv/bin/python setup.py build_ext --inplace && cd ../..
 #    (build_ext also `pip install -e`s third-party/fast-hadamard-transform; takes a few min — CUTLASS int4 GEMM)
 #    Build with the SAME python that RUNS the code (the .venv), not a stray system/conda python.
-#    CUDA 13.3 gotchas (both hit during a fresh build here):
+#    Driver/runtime compatibility must hold for your torch wheel: driver CUDA >= torch.version.cuda.
+#    Example: driver 12.7 cannot run torch+cu130; use a cu12x wheel instead.
+#    CUDA toolkit gotchas (both hit during a fresh build here):
 #      - fast-hadamard 'No module named torch' -> pip build isolation; install it first WITHOUT isolation:
 #          .venv/bin/python -m pip install --no-build-isolation --no-deps vendor/flatquant_ref/third-party/fast-hadamard-transform
-#      - CUTLASS 'cuda/std/utility: No such file' -> CUDA 13.3 puts CCCL headers under .../include/cccl/;
-#          add it:  export CPATH=/usr/local/cuda-13.3/targets/x86_64-linux/include/cccl:$CPATH  before build_ext.
+#      - FlatQuant `setup.py build_ext` may print a non-fatal editable-build warning for fast-hadamard;
+#          if preflight passes and `deploy/_CUDA*.so` exists, setup is usable.
+#      - CUTLASS 'cuda/std/utility: No such file' -> some CUDA installs put CCCL headers under .../include/cccl/;
+#          add it:  export CPATH="$CUDA_HOME/targets/x86_64-linux/include/cccl:$CPATH"  before build_ext.
 #    Fallback: a prebuilt deploy/_CUDA*.so + fast_hadamard_transform*.so from a matching env
-#    (same python 3.13 + torch 2.12+cu130) are ABI-compatible — drop them into deploy/ and .venv site-packages.
+#    (same python + torch/cuda ABI) can be compatible — drop them into deploy/ and .venv site-packages.
 #    Seed test sets -> data/seedtts_testset/   (gdrive 1GlSjVfSHkW3-leKKBlfrjuuTGqQ_xaLP, a tar)
 #    WavLM SIM ckpt  -> eval/ckpt/wavlm_large_finetune.pth   (gdrive 1-aE1NfzpRCLxA4GUxX9ITI3F9LlbtEGP)
 
 ```
 
-Install the Seed-TTS eval assets before running benchmarks. This installs the
-test set and the WavLM checkpoint used by optional SIM evaluation:
+Install the Seed-TTS eval assets before running benchmarks (this is already
+included by default in `scripts/setup_env.sh`). This installs the test set and
+the WavLM checkpoint used by optional SIM evaluation:
 
 ```bash
 # Download from Google Drive into data/seedtts_testset/ and eval/ckpt/
@@ -55,6 +77,12 @@ test -f eval/ckpt/wavlm_large_finetune.pth
 
 ```bash
 source env.sh          # sets PYTHONPATH + repo/data/eval/gen/results paths
+```
+
+After setup, verify everything is usable:
+
+```bash
+bash scripts/preflight_env.sh
 ```
 
 `seedtts_similarity.py` needs `eval/ckpt/wavlm_large_finetune.pth`; alternatively export

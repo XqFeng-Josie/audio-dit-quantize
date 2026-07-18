@@ -3,14 +3,17 @@
 **LAC** (learnable activation clipping) + **add_diag** (learnable per-input-channel scaling),
 on top of LWC + the learnable Kronecker transform.
 
-Per-block protocol (standard PTQ block reconstruction):
+Per-block protocol (official FlatQuant train_utils.py, drift-free by default):
   1. capture block-0 input x + the *shared* per-forward conditioning (t, cond, mask, cond_mask,
      rope, cond_rope, adaln_global_out) across a few calib generations (timestep + content spread).
   2. wrap all target linears (lwc+lac+add_diag).
   3. for each block in order:
-       fp_out  = fp_block(inps)                 # true fp target on the (drifted) quantized input
+       fp_out  = fp_block(inps)   # fp target; also accumulates act absmax for the sq_style diag init
+       init diag_scale (sq_style, alpha=0.3) from calib absmax   [official diag_init]
        train block's quant params to match fp_out (block output MSE)
-       freeze; inps = quant_block(inps)         # advance — errors accumulate, as at deploy
+       freeze; inps = fp_out      # official: propagate the FP output — NO quantization drift
+     (--drift restores the legacy BRECQ/OmniQuant-style advance through the QUANTIZED block,
+      i.e. deploy-realistic error accumulation; the recorded bc_* models used that protocol.)
 
 Usage:
   python -m audio_dit_quantize.flatquant_best \
@@ -18,6 +21,7 @@ Usage:
       --sets hard --limit 0
 """
 import argparse, math, os, time
+import numpy as np
 import torch, soundfile as sf
 from tqdm import tqdm
 
@@ -29,6 +33,13 @@ from . import flatquant_layers as fq
 from .paths import CALIB_LST, DATA_DIR, GEN_DIR, SETS, bc_model_path
 
 DATA = str(DATA_DIR)
+
+
+def _valid_wav(wav):
+    """Finite + not degenerate all-(near)zero. Guards against a broken W4A4 draw silently writing
+    NaN/all-zero wavs that the metric harness would then score as a real generation (audit F3)."""
+    arr = np.asarray(wav)
+    return arr.size > 0 and np.isfinite(arr).all() and float(np.abs(arr).max()) > 1e-6
 
 
 def load_items(lst):
@@ -118,7 +129,8 @@ def _chanbal_weight(fp_outs, dev):
 
 
 def calibrate_perblock(model, store, dev, steps=200, mb=4, lr=5e-3, clip_lr=5e-2, loss_type="mse",
-                       region_gen_w=1.0, region_prompt_w=1.0):
+                       region_gen_w=1.0, region_prompt_w=1.0, drift=False, diag_alpha=0.3,
+                       diag_init=True):
     assert loss_type in ("mse", "chanbal")
     blocks = model.transformer.blocks
     for p in model.parameters():              # only the per-block quant params train; freeze the rest
@@ -142,20 +154,27 @@ def calibrate_perblock(model, store, dev, steps=200, mb=4, lr=5e-3, clip_lr=5e-2
     else:
         wtoks = None
     print(f"[pb] {n} calib seqs, {len(blocks)} blocks, {steps} steps x mb{mb} each"
+          + f" | {'DRIFT (legacy)' if drift else 'fp-propagation (official)'}"
+          + (f" | sq_style diag init a={diag_alpha}" if diag_init else "")
           + (f" | region gen_w={region_gen_w} prompt_w={region_prompt_w}" if region else ""))
     t0 = time.time()
     for bi, blk in enumerate(blocks):
         ws = _block_wrappers(blk)
         if not ws:
             continue
-        # 1) full-precision block target on the current (drifted) input
+        # 1) full-precision block target on the current input; the same fp pass collects each
+        #    linear's activation absmax for the official sq_style diag_scale init
         for w in ws:
             w.enable_quant = False
+            if diag_init:
+                w.begin_smax()
         with torch.no_grad():
             fp_outs = [blk(x=_move(inps[j], dev), **_move(conds[j], dev)).detach().float().cpu()
                        for j in range(n)]
         for w in ws:
             w.enable_quant = True
+            if diag_init:
+                w.init_diag_scale(alpha=diag_alpha)
         cbw = _chanbal_weight(fp_outs, dev) if loss_type == "chanbal" else None   # [dim] or None
         # 2) train block's quant params to match fp_out (block output MSE, optionally chan-balanced)
         trans_p, clip_p = [], []
@@ -170,7 +189,8 @@ def calibrate_perblock(model, store, dev, steps=200, mb=4, lr=5e-3, clip_lr=5e-2
             p.requires_grad_(True)
         opt = torch.optim.AdamW([{"params": trans_p, "lr": lr},
                                  {"params": clip_p, "lr": clip_lr}])
-        sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=steps)
+        # eta_min = flat_lr*1e-3: official train_utils.py cosine floor
+        sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=steps, eta_min=lr * 1e-3)
         for s in range(steps):
             perm = torch.randperm(n)[:mb].tolist()
             opt.zero_grad()
@@ -189,12 +209,17 @@ def calibrate_perblock(model, store, dev, steps=200, mb=4, lr=5e-3, clip_lr=5e-2
             opt.step(); sched.step()
             for w in ws:
                 w.clear_wq_cache()
-        # 3) freeze, then advance inputs through the now-quantized block
+        # 3) freeze, then advance inputs to the next block
         for w in ws:
             w.freeze()
-        with torch.no_grad():
-            inps = [blk(x=_move(inps[j], dev), **_move(conds[j], dev)).detach().float().cpu()
-                    for j in range(n)]
+        if drift:
+            # legacy: advance through the QUANTIZED block — errors accumulate, as at deploy
+            with torch.no_grad():
+                inps = [blk(x=_move(inps[j], dev), **_move(conds[j], dev)).detach().float().cpu()
+                        for j in range(n)]
+        else:
+            # official FlatQuant: propagate the FP output (train_utils.py fp_inps<->fp_outs swap)
+            inps = fp_outs
         del fp_outs, opt
         torch.cuda.empty_cache()
         if (bi + 1) % 4 == 0 or bi == len(blocks) - 1:
@@ -208,7 +233,11 @@ def main():
     ap.add_argument("--out_subdir", required=True)
     ap.add_argument("--model_dir", default="meituan-longcat/LongCat-AudioDiT-1B")
     ap.add_argument("--sets", default="hard", help="comma list of {zh,en,hard} or 'all'")
-    ap.add_argument("--limit", type=int, default=0)
+    ap.add_argument("--limit", type=int, default=0, help="items per set from --offset; 0 = to end of set")
+    ap.add_argument("--offset", type=int, default=0,
+                    help="start item index per set (multi-GPU item sharding). Seed = base + GLOBAL index "
+                         "(offset+local) so a sharded gen is identical to a full gen. Generation only; "
+                         "calibration is unaffected (run it once, single-GPU, with --load_model here).")
     ap.add_argument("--max_seqs", type=int, default=64)
     ap.add_argument("--per_item_keep", type=int, default=2,
                     help="activation snapshots kept per calib prompt. 2 = the canonical recipe that produced the "
@@ -227,7 +256,20 @@ def main():
                     help="per-token weight for the PROMPT region ([:prompt_dur]). >1 up-weights the voice "
                          "conditioning (targets SIM/timbre). 1.0 = off.")
     ap.add_argument("--a_bits", type=int, default=4)
-    ap.add_argument("--a_sym", action="store_true")
+    ap.add_argument("--a_asym", action="store_true",
+                    help="legacy per-token ASYMMETRIC act quant ([0,15]). Default is now SYMMETRIC "
+                         "([-8,7]) — the official paper-best AND what the deploy int4 kernel does. "
+                         "The recorded bc_* models were calibrated with asym.")
+    ap.add_argument("--a_sym", action="store_true",
+                    help="deprecated no-op (symmetric is now the default; use --a_asym for legacy)")
+    ap.add_argument("--drift", action="store_true",
+                    help="legacy propagation: advance calib inputs through the QUANTIZED block "
+                         "(BRECQ-style, deploy-realistic error accumulation). Default is now the "
+                         "official FlatQuant drift-free protocol (fp inputs/targets per block).")
+    ap.add_argument("--diag_alpha", type=float, default=0.3,
+                    help="sq_style diag_scale init exponent (official diag_alpha default)")
+    ap.add_argument("--no_diag_init", action="store_true",
+                    help="skip the sq_style diag init (legacy: diag_scale starts at ones)")
     ap.add_argument("--no_lac", action="store_true")
     ap.add_argument("--no_diag", action="store_true")
     ap.add_argument("--base", type=int, default=1024,
@@ -241,6 +283,9 @@ def main():
                     help="skip calibration and LOAD --model — its W4A4 numbers then match the step-axis 'full' baseline exactly")
     ap.add_argument("--save_model", action="store_true",
                     help="after calibration, torch.save to --model — makes this the ONE producer of the canonical fixed model")
+    ap.add_argument("--calibrate_only", action="store_true",
+                    help="calibrate (+ --save_model) then EXIT before generation. Lets a multi-GPU launcher do the "
+                         "single-GPU calibration once, then fan out sharded generation with --load_model.")
     ap.add_argument("--device", default="cuda:0")
     args = ap.parse_args()
     dev = torch.device(args.device)
@@ -266,24 +311,33 @@ def main():
         print(f"[pb] capturing block-0 activations on {len(calib)} prompts ...")
         store = capture_block_inputs(model, tok, dev, calib, args.max_seqs, args.per_item_keep)
         print(f"[pb] captured {len(store)} sequences")
+        if args.a_sym:
+            print("[pb] note: --a_sym is deprecated (symmetric is now the default)")
         fq.wrap_dit(model, w_bits=4, a_bits=args.a_bits, use_trans=True, lwc=True,
-                    a_sym=args.a_sym, lac=not args.no_lac, add_diag=not args.no_diag)
+                    a_sym=not args.a_asym, lac=not args.no_lac, add_diag=not args.no_diag)
         calibrate_perblock(model, store, dev, steps=args.steps, mb=args.mb,
                            lr=args.lr, clip_lr=args.clip_lr, loss_type=args.loss,
-                           region_gen_w=args.region_gen_w, region_prompt_w=args.region_prompt_w)
+                           region_gen_w=args.region_gen_w, region_prompt_w=args.region_prompt_w,
+                           drift=args.drift, diag_alpha=args.diag_alpha,
+                           diag_init=not args.no_diag_init and not args.no_diag)
         if args.save_model:
             os.makedirs(os.path.dirname(model_path) or ".", exist_ok=True)
             torch.save(model, model_path)
             print(f"[pb] saved canonical fixed model -> {model_path}")
 
+    if args.calibrate_only:
+        print("[pb] calibrate_only: model ready, skipping generation")
+        print("DONE")
+        return
+
     sel = list(SETS) if args.sets == "all" else [s.strip() for s in args.sets.split(",")]
     for name in sel:
-        items = load_items(os.path.join(DATA, SETS[name]))
-        if args.limit:
-            items = items[: args.limit]
+        _all = load_items(os.path.join(DATA, SETS[name]))
+        items = _all[args.offset:(args.offset + args.limit) if args.limit else None]
         outdir = os.path.join(genroot, name)
         os.makedirs(outdir, exist_ok=True)
         t0 = time.time()
+        n_invalid = n_err = 0
         iterator = tqdm(
             enumerate(items),
             total=len(items),
@@ -295,14 +349,21 @@ def main():
             if os.path.exists(op):
                 iterator.set_postfix_str("skip existing")
                 continue
-            torch.manual_seed(args.base + idx); torch.cuda.manual_seed(args.base + idx)  # per-item, order-free
+            gidx = args.offset + idx                                                      # global index -> shard-invariant seed
+            torch.manual_seed(args.base + gidx); torch.cuda.manual_seed(args.base + gidx)  # per-item, order/shard-free
             try:
                 wav = infer_one(gt, pt, pwa, model, tok, dev, 16, 4.0, "apg")
+                if not _valid_wav(wav):
+                    n_invalid += 1
+                    tqdm.write(f"[{name} {idx}] INVALID {uid}: non-finite or all-zero output (not written)")
+                    continue
                 sf.write(op, wav, model.config.sampling_rate)
                 iterator.set_postfix_str(uid[:32])
             except Exception as e:
+                n_err += 1
                 tqdm.write(f"[{name} {idx}] ERR {uid}: {e}")
-        print(f"[{name}] {len(items)} items in {time.time()-t0:.0f}s -> {outdir}")
+        print(f"[{name}] {len(items)} items in {time.time()-t0:.0f}s -> {outdir}"
+              + (f"  [WARN invalid={n_invalid} err={n_err}]" if (n_invalid or n_err) else ""))
     print("DONE")
 
 

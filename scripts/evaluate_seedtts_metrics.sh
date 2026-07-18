@@ -6,7 +6,8 @@
 # automatically after generation.
 #
 # Defaults:
-#   zh/hard -> CER, en -> WER, all sets -> UTMOS + DNSMOS
+#   zh/hard -> CER, en -> WER, all sets -> UTMOS + DNSMOS + WavLM SIM
+#   (SIM needs eval/ckpt/wavlm_large_finetune.pth; pass an explicit metric list to drop it)
 # Usage:
 #   bash scripts/evaluate_seedtts_metrics.sh <gen_root> <result_prefix> ["zh en hard"] ["wer cer mos"]
 # Examples:
@@ -30,6 +31,14 @@
 #   ASR_BATCH_SIZE_S=auto       auto-tune FunASR zh batch_size_s; set an int to override
 #   ASR_GPU_MEM_GIB=40          override detected GPU memory for ASR auto-tuning
 #
+# Acceleration (resource-aware; sets zh/en/hard are independent -> evaluated in parallel across GPUs):
+#   GPUS="0,2,3"        which physical GPUs to use (shared with the generation launchers). Unset -> use
+#                       CUDA_VISIBLE_DEVICES (or all) filtered by free memory. Single GPU -> sequential.
+#   EVAL_JOBS=auto      parallel workers: auto = min(#sets, #usable GPUs); 1 = force sequential; or an int
+#   GPU_MIN_FREE_GIB=8  when GPUS is unset, a GPU joins the pool only if it has >= this much free memory
+#   (single usable GPU -> sequential, identical to the old behaviour; each worker gets one GPU + an even
+#    share of CPU threads via OMP_NUM_THREADS to avoid oversubscription.)
+#
 # Outputs:
 #   results/<result_prefix>_<set>_cer.txt or results/<result_prefix>_<set>_wer.txt
 #   results/<result_prefix>_<set>_utmos.txt
@@ -39,11 +48,12 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 source "$ROOT_DIR/env.sh"
+source "$ROOT_DIR/scripts/gpu_parallel.sh"   # gpu_pool() — the shared GPU-range knob (GPUS / CUDA_VISIBLE_DEVICES)
 
 gen_root="${1:?usage: evaluate_seedtts_metrics.sh <gen_root> <result_prefix> [sets] [metrics]}"
 result_prefix="${2:?usage: evaluate_seedtts_metrics.sh <gen_root> <result_prefix> [sets] [metrics]}"
 sets="${3:-zh en hard}"
-metrics="${4:-${METRICS:-wer cer mos}}"
+metrics="${4:-${METRICS:-wer cer mos sim}}"
 
 [ "$sets" = "all" ] && sets="zh en hard"
 sets="${sets//,/ }"
@@ -61,6 +71,10 @@ case "$gen_root" in
 esac
 
 mkdir -p "$SEED_RESULTS_DIR"
+
+# Preserve any user-pinned ASR mem hint BEFORE the global auto-detect below fills it in, so parallel
+# workers can re-detect per assigned GPU without inheriting the first GPU's value.
+USER_ASR_GPU_MEM_GIB="${ASR_GPU_MEM_GIB:-}"
 
 detect_asr_gpu_mem() {
   [ -z "${ASR_GPU_MEM_GIB:-}" ] || return 0
@@ -122,6 +136,14 @@ score_text_metric() {
   local run_wer_py="$SEED_REPRO_DIR/src/audio_dit_quantize/seedtts_asr.py"
 
   make_wav_res_ref_text "$meta" "$gen_dir"
+  # Guard (audit F4): if no (gen wav <-> ref) pairs were produced — e.g. generated wav filenames do
+  # not match the meta utt ids, or generation wrote nothing — the ASR merge is empty and average_wer.py
+  # computes mean([]) = nan, writing "WER: nan%" and exiting 0. set -e cannot catch a nan, so the
+  # pipeline would report success on a non-result. Fail loudly instead.
+  if [ ! -s "$wav_res_ref_text" ]; then
+    echo "[metrics] ERROR: no (gen wav <-> ref) pairs for $gen_dir (empty $wav_res_ref_text) — generated wav filenames do not match meta utt ids, or generation produced no wavs." >&2
+    exit 1
+  fi
   (
     cd "$SEED_EVAL_DIR"
     CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-${GPU_INDEX:-0}}" "$PYTHON_BIN" "$run_wer_py" "$wav_res_ref_text" "$merge" "$lang"
@@ -129,6 +151,12 @@ score_text_metric() {
   )
   echo "---- $score_file ----"
   tail -1 "$score_file"
+  # Second guard: a nan can still slip through if every utterance failed ASR (empty merge). Do not
+  # leave a "nan%" file masquerading as a valid metric.
+  if grep -qi 'nan' "$score_file"; then
+    echo "[metrics] ERROR: $score_file contains nan (no validly scored utterances in $gen_dir)." >&2
+    exit 1
+  fi
 }
 
 score_sim_metric() {
@@ -154,34 +182,36 @@ score_mos_metrics() {
   done
 }
 
-for setname in $sets; do
-  case "$setname" in
-    zh)
-      meta="$SEED_DATA_DIR/zh/meta.lst"
-      lang=zh
-      text_metric=cer
-      metric_suffix=zh_cer
-      ;;
-    en)
-      meta="$SEED_DATA_DIR/en/meta.lst"
-      lang=en
-      text_metric=wer
-      metric_suffix=en_wer
-      ;;
-    hard)
-      meta="$SEED_DATA_DIR/zh/hardcase.lst"
-      lang=zh
-      text_metric=cer
-      metric_suffix=hard_cer
-      ;;
-    *)
-      echo "[metrics] unknown set: $setname" >&2
-      exit 2
-      ;;
-  esac
+# Fail early (before any heavy ASR/MOS work) if SIM is requested but the WavLM checkpoint is absent.
+if want_metric sim && [ ! -f "${WAVLM_CKPT:-}" ]; then
+  echo "[metrics] ERROR: SIM requested but WavLM checkpoint not found: ${WAVLM_CKPT:-<unset>}" >&2
+  echo "        get it with: bash scripts/download_seedtts_testset.sh   (or export WAVLM_CKPT=/path/to/wavlm_large_finetune.pth)" >&2
+  echo "        or drop SIM:  EVAL_METRICS=\"wer cer mos\" bash scripts/evaluate_seedtts_metrics.sh ..." >&2
+  exit 1
+fi
 
-  gen_dir="$gen_root/$setname"
+run_set() {
+  local setname="$1" gpu="${2:-}"
+  local meta lang text_metric metric_suffix
+  case "$setname" in
+    zh)   meta="$SEED_DATA_DIR/zh/meta.lst";     lang=zh; text_metric=cer; metric_suffix=zh_cer ;;
+    en)   meta="$SEED_DATA_DIR/en/meta.lst";     lang=en; text_metric=wer; metric_suffix=en_wer ;;
+    hard) meta="$SEED_DATA_DIR/zh/hardcase.lst"; lang=zh; text_metric=cer; metric_suffix=hard_cer ;;
+    *) echo "[metrics] unknown set: $setname" >&2; exit 2 ;;
+  esac
+  local gen_dir="$gen_root/$setname"
   [ -d "$gen_dir" ] || { echo "[metrics] missing generated dir: $gen_dir" >&2; exit 1; }
+
+  # Pin this worker to its assigned GPU (subshell-local); re-detect ASR mem for THIS GPU and split CPU
+  # threads across workers so N parallel evals do not oversubscribe the cores.
+  if [ -n "$gpu" ]; then
+    export CUDA_VISIBLE_DEVICES="$gpu"; export DEVICE="cuda:0"; export ASR_DEVICE="cuda:0"
+    ASR_GPU_MEM_GIB="$USER_ASR_GPU_MEM_GIB"; detect_asr_gpu_mem
+    if [ -z "${OMP_NUM_THREADS:-}" ] && command -v nproc >/dev/null 2>&1; then
+      export OMP_NUM_THREADS="$(( ( $(nproc) + jobs - 1 ) / jobs ))"
+    fi
+    echo "[metrics] set=$setname -> physical GPU $gpu (DEVICE=cuda:0, OMP_NUM_THREADS=${OMP_NUM_THREADS:-default})"
+  fi
 
   if want_metric "$text_metric"; then
     score_text_metric "$meta" "$gen_dir" "$lang" "$SEED_RESULTS_DIR/${result_prefix}_${metric_suffix}.txt"
@@ -192,4 +222,46 @@ for setname in $sets; do
   if want_metric mos; then
     score_mos_metrics "$gen_dir" "$setname"
   fi
-done
+}
+
+# ── resolve parallelism from live GPU state (shared GPUS / CUDA_VISIBLE_DEVICES knob) ──
+read -r -a GPU_POOL <<< "$(gpu_pool)"
+NGPU="${#GPU_POOL[@]}"
+set_arr=($sets); NSETS="${#set_arr[@]}"
+eval_jobs="${EVAL_JOBS:-auto}"
+if [ "$eval_jobs" = "auto" ]; then
+  if [ "$NGPU" -gt 1 ]; then jobs=$(( NGPU < NSETS ? NGPU : NSETS )); else jobs=1; fi
+else
+  jobs="$eval_jobs"
+  if [ "$jobs" -lt 1 ]; then jobs=1; fi
+  if [ "$NGPU" -gt 0 ] && [ "$jobs" -gt "$NGPU" ]; then jobs="$NGPU"; fi   # never more workers than usable GPUs
+  if [ "$jobs" -gt "$NSETS" ]; then jobs="$NSETS"; fi
+fi
+
+if [ "$jobs" -le 1 ]; then
+  # Sequential (single usable GPU or forced): live output, uses the ambient DEVICE — identical to the
+  # old behaviour (no GPU pinning, no OMP override).
+  for setname in $sets; do ( run_set "$setname" "" ); done
+else
+  echo "[metrics] parallel eval: $NSETS set(s) over $jobs GPU worker(s) [usable pool: ${GPU_POOL[*]}]"
+  # Wave scheduling: at most `jobs` sets concurrently, one per distinct GPU; capture each worker's
+  # output to a log and replay in order so the parallel logs stay readable.
+  i=0; fail=0
+  while [ "$i" -lt "$NSETS" ]; do
+    pids=(); names=(); logs=(); w=0
+    while [ "$w" -lt "$jobs" ] && [ "$i" -lt "$NSETS" ]; do
+      s="${set_arr[$i]}"; gpu="${GPU_POOL[$(( w % NGPU ))]}"; log="$(mktemp)"
+      ( run_set "$s" "$gpu" ) >"$log" 2>&1 &
+      pids+=("$!"); names+=("$s"); logs+=("$log")
+      i=$(( i + 1 )); w=$(( w + 1 ))
+    done
+    for k in "${!pids[@]}"; do
+      if ! wait "${pids[$k]}"; then fail=1; fi
+      echo "===== [eval:${names[$k]}] ====="; cat "${logs[$k]}"; rm -f "${logs[$k]}"
+    done
+    if [ "$fail" -eq 1 ]; then
+      echo "[metrics] ERROR: a parallel eval worker failed (see above)." >&2
+      exit 1
+    fi
+  done
+fi

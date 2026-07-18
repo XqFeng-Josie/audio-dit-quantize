@@ -20,9 +20,12 @@ Run (after `source env.sh`):
   # generate the three configs, then evaluate each config dir with the standard harness:
   python -m audio_dit_quantize.generate_step_axis --model_dir meituan-longcat/LongCat-AudioDiT-1B \
       --sets zh,en,hard --configs full,early,late
-  bash scripts/evaluate_seedtts_metrics.sh gen/step_axis/late/1b step_late "zh en hard"
+  bash scripts/evaluate_seedtts_metrics.sh gen/step_axis/late step_late "zh en hard"
+  # NOTE: pass a model-scoped --out_subdir for 3.5B (the benchmark script uses step_axis_3.5b) so a
+  # 3.5B run does not reuse the 1B run's cached wavs (skip-existing) or overwrite its result files.
 """
 import argparse, os, time
+import numpy as np
 import torch, soundfile as sf
 
 import audiodit  # noqa
@@ -43,6 +46,13 @@ CONFIGS = {
     "noact": set(range(NSTEPS)),       # all steps fp activation   (weight-only W4 ceiling)
 }
 
+def _valid_wav(wav):
+    """Finite + not degenerate all-(near)zero. A protected/quantized step combination that silently
+    emits NaN/all-zero must not be written, or the paired ΔSIM would be computed on garbage (audit F3)."""
+    arr = np.asarray(wav)
+    return arr.size > 0 and np.isfinite(arr).all() and float(np.abs(arr).max()) > 1e-6
+
+
 _st = {"fwd": 0, "protect": set()}
 def _hook(*_a):
     step = _st["fwd"] // FPS
@@ -56,6 +66,7 @@ def gen_config(model, tok, dev, items, base, outdir, nfe, cfg, guid, protect):
     os.makedirs(outdir, exist_ok=True)
     _st["protect"] = protect
     t0 = time.time()
+    n_invalid = n_err = 0
     for idx, (uid, pt, pwa, gt) in enumerate(items):
         op = os.path.join(outdir, f"{uid}.wav")
         if os.path.exists(op):
@@ -64,10 +75,17 @@ def gen_config(model, tok, dev, items, base, outdir, nfe, cfg, guid, protect):
         torch.manual_seed(base + idx); torch.cuda.manual_seed(base + idx)
         try:
             wav = infer_one(gt, pt, pwa, model, tok, dev, nfe, cfg, guid)
+            if not _valid_wav(wav):
+                n_invalid += 1
+                print(f"  [{idx}] INVALID {uid}: non-finite or all-zero output (not written)", flush=True)
+                continue
             sf.write(op, wav, model.config.sampling_rate)
         except Exception as e:
+            n_err += 1
             print(f"  [{idx}] ERR {uid}: {e}", flush=True)
     fq._ACT_QUANT = True
+    if n_invalid or n_err:
+        print(f"  [WARN] {outdir}: invalid={n_invalid} err={n_err}", flush=True)
     return time.time() - t0
 
 
