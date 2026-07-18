@@ -5,7 +5,7 @@
 # calibration-seed noise?  This gate decides the whole data-selection line.
 #
 # Jobs (all independent -> wave-scheduled across the GPU pool, one GPU each):
-#   fp32                          dev-split fp32 reference (paired-Δ anchor), generated ONCE
+#   fp32                          dev-split fp32 reference (paired-Δ anchor), generated ONCE (runs LAST)
 #   rand<SET_SIZE>_s{0..K-1}      FlatQuant frozen-best calibrated on K random pool draws, calib_seed 0
 #   rand<SET_SIZE>_s0_cs{c}       SAME draw s0 under other calib seeds  -> seed-noise baseline
 # Each job: calibrate (in-process, ablation-style — no model files) -> generate dev sets -> evaluate.
@@ -24,7 +24,7 @@
 #   SEED_REPEATS="1 2 3" extra calib seeds re-running draw s0 (seed-noise baseline; "" = none)
 #   POOL_LST=data/calib_pool/pool_v1.lst
 #   SETS_DEV="zh_dev hard_dev en_dev"
-#   EVAL_METRICS="wer cer mos sim"
+#   EVAL_METRICS="wer cer sim"   (mos off by default — post-hoc computable from the kept wavs)
 #   STEPS/MB/MAX_SEQS/PER_ITEM_KEEP  FlatQuant budget (defaults = frozen paper-best 200/4/64/2)
 #   BASE=1024 LIMIT=0 GPUS=...
 #
@@ -50,7 +50,9 @@ SET_SIZE="${SET_SIZE:-32}"
 SEED_REPEATS="${SEED_REPEATS-1 2 3}"
 POOL_LST="${POOL_LST:-data/calib_pool/pool_v1.lst}"
 SETS_DEV="${SETS_DEV:-zh_dev hard_dev en_dev}"
-EVAL_METRICS="${EVAL_METRICS:-wer cer mos sim}"
+# mos dropped from the default (2026-07-19): least calibration-sensitive metric, and wavs are kept
+# so MOS is post-hoc computable anytime via evaluate_seedtts_metrics.sh <gen_root> <tag> <sets> mos
+EVAL_METRICS="${EVAL_METRICS:-wer cer sim}"
 BASE="${BASE:-1024}"; LIMIT="${LIMIT:-0}"
 STEPS="${STEPS:-200}"; MB="${MB:-4}"; MAX_SEQS="${MAX_SEQS:-64}"; PER_ITEM_KEEP="${PER_ITEM_KEEP:-2}"
 sets_csv="${SETS_DEV// /,}"
@@ -66,19 +68,29 @@ for (( k=0; k<K; k++ )); do
 done
 
 # job spec: name|kind|calib_lst|calib_seed
-JOBS=("fp32|fp32||")
+# fp32 goes LAST: it is much faster than a flat job, so pairing it into an early wave leaves its
+# GPU idle behind the wave barrier for hours; flat-only waves are duration-homogeneous.
+JOBS=()
 for (( k=0; k<K; k++ )); do
   JOBS+=("rand${SET_SIZE}_s${k}|flat|data/calib_pool/sets/rand${SET_SIZE}_s${k}.lst|0")
 done
 for c in $SEED_REPEATS; do
   JOBS+=("rand${SET_SIZE}_s0_cs${c}|flat|data/calib_pool/sets/rand${SET_SIZE}_s0.lst|$c")
 done
+JOBS+=("fp32|fp32||")
 
-job_done() {  # all per-set text-metric result files present -> job complete
-  local tag="$1" s m
+job_done() {  # all per-set text-metric result files present AND valid -> job complete
+  local tag="$1" s m f
   for s in $SETS_DEV; do
     case "$s" in en*) m=wer ;; *) m=cer ;; esac
-    [ -s "$SEED_RESULTS_DIR/${tag}_${s}_${m}.txt" ] || return 1
+    f="$SEED_RESULTS_DIR/${tag}_${s}_${m}.txt"
+    [ -s "$f" ] || return 1
+    if grep -qi 'nan' "$f"; then
+      # poisoned leftover from a failed eval (e.g. ASR OOM on a shared GPU) — remove it so the
+      # resume re-runs this job instead of silently skipping it
+      echo "[p0] WARN: $f contains nan -> deleting, job ${tag} will re-run" >&2
+      rm -f "$f"; return 1
+    fi
   done
   return 0
 }
