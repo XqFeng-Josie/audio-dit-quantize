@@ -33,12 +33,39 @@ export DEVICE="${DEVICE:-cuda:0}"
 # LongCat gives `audiodit`+`batch_inference`.
 export PYTHONPATH="$AQ/src:$AQ/vendor/flatquant_ref:$LONGCAT_DIR${PYTHONPATH:+:$PYTHONPATH}"
 
-# Pick a default CUDA_HOME if not provided: prefer the newest installed /usr/local/cuda-*
+# Pick a default CUDA_HOME if not provided: prefer the newest installed toolkit
+# that does not exceed the driver-reported CUDA version.
 if [ -z "${CUDA_HOME:-}" ]; then
-  CUDA_HOME_CANDIDATE="$(ls -d /usr/local/cuda-[0-9]* 2>/dev/null | sort -V | tail -n1)"
+  _aq_version_le() {
+    [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -n1)" = "$1" ]
+  }
+  _aq_detect_driver_cuda() {
+    command -v nvidia-smi >/dev/null 2>&1 || return 1
+    nvidia-smi 2>/dev/null | sed -nE 's/.*CUDA Version: ([0-9]+\.[0-9]+).*/\1/p' | head -n1
+  }
+  _aq_pick_cuda_home() {
+    local drv cand ver
+    drv="$(_aq_detect_driver_cuda || true)"
+    while IFS= read -r cand; do
+      [ -n "$cand" ] || continue
+      ver="${cand##*/cuda-}"
+      if [ -z "$drv" ] || _aq_version_le "$ver" "$drv"; then
+        echo "$cand"
+        return
+      fi
+    done < <(ls -d /usr/local/cuda-[0-9]* 2>/dev/null | sort -Vr || true)
+    if [ -d /usr/local/cuda ]; then
+      echo "/usr/local/cuda"
+      return
+    fi
+    ls -d /usr/local/cuda-[0-9]* 2>/dev/null | sort -V | tail -n1
+  }
+
+  CUDA_HOME_CANDIDATE="$(_aq_pick_cuda_home)"
   if [ -n "$CUDA_HOME_CANDIDATE" ] && [ -d "$CUDA_HOME_CANDIDATE" ]; then
     export CUDA_HOME="$CUDA_HOME_CANDIDATE"
   fi
+  unset -f _aq_version_le _aq_detect_driver_cuda _aq_pick_cuda_home 2>/dev/null || true
 fi
 if [ -n "${CUDA_HOME:-}" ] && [ -d "$CUDA_HOME" ]; then
   export PATH="$CUDA_HOME/bin:$PATH"

@@ -23,6 +23,20 @@ pick_python() {
   command -v python
 }
 
+check_python_version() {
+  local py_ver
+  py_ver="$("$PYTHON_BIN" - <<'PY'
+import sys
+print(f"{sys.version_info.major}.{sys.version_info.minor}")
+PY
+)"
+  if [ "$py_ver" != "3.13" ]; then
+    echo "[setup] unsupported Python $py_ver; this repo pins Python 3.13 dependencies." >&2
+    echo "[setup] install python3.13 or rerun with PYTHON_BIN=/path/to/python3.13." >&2
+    return 1
+  fi
+}
+
 ensure_venv() {
   if [ ! -x "$PYTHON_BIN" ]; then
     local py
@@ -30,6 +44,7 @@ ensure_venv() {
     log "creating venv with $py"
     "$py" -m venv .venv
   fi
+  check_python_version
   "$PYTHON_BIN" -m pip install --upgrade pip setuptools wheel
 }
 
@@ -50,22 +65,19 @@ pick_torch_index() {
   local major minor
 
   if [ -z "$drv" ]; then
-    echo "https://download.pytorch.org/whl/cu124"
-    return
+    echo "[setup] could not detect NVIDIA driver CUDA version with nvidia-smi." >&2
+    echo "[setup] this setup needs driver CUDA >= 12.4; run on a GPU node or fix the driver." >&2
+    return 1
   fi
 
   major="${drv%%.*}"
   minor="${drv##*.}"
 
   if [ "$major" -ge 13 ]; then
-    echo "https://download.pytorch.org/whl/cu128"
+    echo "https://download.pytorch.org/whl/cu126"
     return
   fi
 
-  if [ "$major" -eq 12 ] && [ "$minor" -ge 8 ]; then
-    echo "https://download.pytorch.org/whl/cu128"
-    return
-  fi
   if [ "$major" -eq 12 ] && [ "$minor" -ge 6 ]; then
     echo "https://download.pytorch.org/whl/cu126"
     return
@@ -74,27 +86,40 @@ pick_torch_index() {
     echo "https://download.pytorch.org/whl/cu124"
     return
   fi
-  if [ "$major" -eq 12 ] && [ "$minor" -ge 1 ]; then
-    echo "https://download.pytorch.org/whl/cu121"
-    return
-  fi
-  echo "https://download.pytorch.org/whl/cu118"
+
+  echo "[setup] unsupported NVIDIA driver CUDA version: $drv" >&2
+  echo "[setup] need driver CUDA >= 12.4 for the tested cu124 stack, or >= 12.6 for the README torch 2.12 stack." >&2
+  return 1
 }
 
 install_python_deps() {
-  local req_no_torch
-  req_no_torch="$(mktemp)"
-  grep -Ev '^(torch|torchaudio)==|^# --- core' requirements.txt > "$req_no_torch"
-
-  log "installing repo requirements (excluding torch/torchaudio)"
-  "$PYTHON_BIN" -m pip install -r "$req_no_torch"
-  rm -f "$req_no_torch"
-
   local drv idx
   drv="$(detect_driver_cuda || true)"
   idx="$(pick_torch_index "$drv")"
+
+  local torch_ver torchaudio_ver torchao_ver
+  if [ "$idx" = "https://download.pytorch.org/whl/cu124" ]; then
+    torch_ver="2.6.0"
+    torchaudio_ver="2.6.0"
+    torchao_ver="0.9.0"
+  else
+    torch_ver="2.12.0"
+    torchaudio_ver="2.11.0"
+    torchao_ver="0.17.0"
+  fi
+
   log "driver CUDA: ${drv:-unknown}, installing torch stack from $idx"
-  # "$PYTHON_BIN" -m pip install --upgrade --index-url "$idx" torch==2.12.0 torchaudio==2.11.0
+  log "torch stack: torch==$torch_ver torchaudio==$torchaudio_ver torchao==$torchao_ver"
+  "$PYTHON_BIN" -m pip install --upgrade --index-url "$idx" \
+    "torch==$torch_ver" "torchaudio==$torchaudio_ver" "torchao==$torchao_ver"
+
+  local req_no_torch_stack
+  req_no_torch_stack="$(mktemp)"
+  grep -Ev '^(torch|torchaudio|torchao)==|^# --- core' requirements.txt > "$req_no_torch_stack"
+
+  log "installing repo requirements (excluding torch/torchaudio/torchao)"
+  "$PYTHON_BIN" -m pip install -r "$req_no_torch_stack"
+  rm -f "$req_no_torch_stack"
 }
 
 clone_if_missing() {
@@ -129,21 +154,36 @@ apply_patch_if_needed() {
   log "patch state unclear for $(basename "$patch_file"); please inspect manually"
 }
 
+version_le() {
+  [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -n1)" = "$1" ]
+}
+
 pick_cuda_home() {
   if [ -n "${CUDA_HOME:-}" ] && [ -d "$CUDA_HOME" ]; then
     echo "$CUDA_HOME"
     return
   fi
 
-  local cand
-  cand="$(ls -d /usr/local/cuda-[0-9]* 2>/dev/null | sort -V | tail -n1 || true)"
-  if [ -n "$cand" ] && [ -d "$cand" ]; then
-    echo "$cand"
-    return
-  fi
+  local drv cand ver
+  drv="$(detect_driver_cuda || true)"
+
+  while IFS= read -r cand; do
+    [ -n "$cand" ] || continue
+    ver="${cand##*/cuda-}"
+    if [ -z "$drv" ] || version_le "$ver" "$drv"; then
+      echo "$cand"
+      return
+    fi
+  done < <(ls -d /usr/local/cuda-[0-9]* 2>/dev/null | sort -Vr || true)
 
   if [ -d /usr/local/cuda ]; then
     echo "/usr/local/cuda"
+    return
+  fi
+
+  cand="$(ls -d /usr/local/cuda-[0-9]* 2>/dev/null | sort -V | tail -n1 || true)"
+  if [ -n "$cand" ] && [ -d "$cand" ]; then
+    echo "$cand"
     return
   fi
 
@@ -159,8 +199,6 @@ setup_repos_and_kernels() {
   git -C vendor/flatquant_ref submodule update --init --recursive
   apply_patch_if_needed "vendor/flatquant_ref" "../../patches/flatquant_cudagraph_stream.patch"
 
-  "$PYTHON_BIN" -m pip install --no-build-isolation --no-deps vendor/flatquant_ref/third-party/fast-hadamard-transform
-
   local cuda_home
   cuda_home="$(pick_cuda_home)"
   if [ -z "$cuda_home" ]; then
@@ -174,6 +212,8 @@ setup_repos_and_kernels() {
   if [ -d "$CUDA_HOME/targets/x86_64-linux/include/cccl" ]; then
     export CPATH="$CUDA_HOME/targets/x86_64-linux/include/cccl${CPATH:+:$CPATH}"
   fi
+
+  "$PYTHON_BIN" -m pip install --no-build-isolation --no-deps vendor/flatquant_ref/third-party/fast-hadamard-transform
 
   log "note: FlatQuant setup.py may print a non-fatal editable-build warning for fast_hadamard_transform"
   log "building FlatQuant deploy extension with CUDA_HOME=$CUDA_HOME"
