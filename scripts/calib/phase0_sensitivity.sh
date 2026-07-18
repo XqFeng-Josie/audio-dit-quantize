@@ -27,6 +27,8 @@
 #   EVAL_METRICS="wer cer sim"   (mos off by default — post-hoc computable from the kept wavs)
 #   STEPS/MB/MAX_SEQS/PER_ITEM_KEEP  FlatQuant budget (defaults = frozen paper-best 200/4/64/2)
 #   BASE=1024 LIMIT=0 GPUS=...
+#   STATUS_INTERVAL=120  console heartbeat: every N s print one line per RUNNING job with its
+#                        newest log line (capture x/32 -> [pb] block i/24 loss -> gen 45% -> eval)
 #
 # PROTOCOL: contribution knobs stay OFF (loss=mse, no region weights). Dev-list per-item seeds pair
 # only with other dev runs (see dev_split.py note). Analysis: phase0_collect (aggregate CSV) +
@@ -116,35 +118,78 @@ run_job() {  # run_job <name> <kind> <lst> <cseed> <gpu>   (CUDA_VISIBLE_DEVICES
 read -r -a POOL <<< "$(gpu_pool)"
 NG="${#POOL[@]}"
 [ "$NG" -ge 1 ] || { echo "[p0] no usable GPUs (GPUS / GPU_MIN_FREE_GIB)" >&2; exit 1; }
+STATUS_INTERVAL="${STATUS_INTERVAL:-120}"
 echo "[p0] ${#JOBS[@]} job(s) over $NG GPU(s) [pool: ${POOL[*]}] | model=$MODEL_DIR sets=$SETS_DEV"
 echo "[p0] budget: steps=$STEPS mb=$MB max_seqs=$MAX_SEQS per_item_keep=$PER_ITEM_KEEP | K=$K set_size=$SET_SIZE seed_repeats='$SEED_REPEATS'"
+echo "[p0] queue (= complete, will skip | * pending):"
+for spec in "${JOBS[@]}"; do
+  IFS='|' read -r jn _ _ _ <<< "$spec"
+  if job_done "p0_${jn}${msuf}"; then echo "  = ${jn}"; else echo "  * ${jn}"; fi
+done
 
-i=0; fail=0
+_now() { date +%H:%M:%S; }
+_min() { echo $(( ($(date +%s) - $1) / 60 )); }
+_last_line() {  # newest non-empty line of a log (tqdm \r-aware), truncated for one-line status
+  tail -c 4096 "$1" 2>/dev/null | tr '\r' '\n' | grep -E '\S' | tail -1 | cut -c1-110
+}
+
+run_t0=$(date +%s); n_done=0; n_skip=0; wave=0; fail=0; failed_jobs=()
+i=0
 while [ "$i" -lt "${#JOBS[@]}" ]; do
-  pids=(); names=(); logs=(); w=0
+  wave=$(( wave + 1 ))
+  pids=(); names=(); logs=(); gpus=(); starts=(); w=0
   while [ "$w" -lt "$NG" ] && [ "$i" -lt "${#JOBS[@]}" ]; do
     IFS='|' read -r jname jkind jlst jseed <<< "${JOBS[$i]}"
     i=$(( i + 1 ))
     if job_done "p0_${jname}${msuf}"; then
-      echo "[p0] skip ${jname} (results complete)"
+      echo "[p0 $(_now)] skip ${jname} (results complete)"
+      n_skip=$(( n_skip + 1 ))
       continue
     fi
     gpu="${POOL[$w]}"; log="logs/p0/${jname}${msuf}.log"
-    echo "[p0] launch ${jname} -> GPU $gpu (log: $log)"
+    echo "[p0 $(_now)] wave $wave: launch ${jname} -> GPU $gpu  (follow: tail -f $log)"
     ( export CUDA_VISIBLE_DEVICES="$gpu" DEVICE="cuda:0"
-      run_job "$jname" "$jkind" "$jlst" "$jseed" "$gpu" ) >"$log" 2>&1 &
-    pids+=("$!"); names+=("$jname"); logs+=("$log")
+      echo "[job] ${jname} gpu=${gpu} kind=${jkind} calib_lst=${jlst:-none} calib_seed=${jseed:-none} start=$(date '+%F %T')"
+      run_job "$jname" "$jkind" "$jlst" "$jseed" "$gpu"
+      echo "[job] ${jname} end=$(date '+%F %T')" ) >"$log" 2>&1 &
+    pids+=("$!"); names+=("$jname"); logs+=("$log"); gpus+=("$gpu"); starts+=("$(date +%s)")
     w=$(( w + 1 ))
+  done
+  [ "${#pids[@]}" -eq 0 ] && continue
+  # heartbeat while the wave runs: one status line per live job + overall progress
+  while :; do
+    alive=0
+    for p in "${pids[@]}"; do kill -0 "$p" 2>/dev/null && { alive=1; break; }; done
+    [ "$alive" -eq 0 ] && break
+    sleep "$STATUS_INTERVAL"
+    for k2 in "${!pids[@]}"; do
+      kill -0 "${pids[$k2]}" 2>/dev/null || continue
+      echo "[p0 $(_now)] RUN  ${names[$k2]}@gpu${gpus[$k2]} $(_min "${starts[$k2]}")min :: $(_last_line "${logs[$k2]}")"
+    done
+    echo "[p0 $(_now)] progress: done $n_done + skip $n_skip of ${#JOBS[@]} | wave $wave | total elapsed $(_min "$run_t0")min"
   done
   for k2 in "${!pids[@]}"; do
     if wait "${pids[$k2]}"; then
-      echo "[p0] done ${names[$k2]}"
+      n_done=$(( n_done + 1 ))
+      summary=""
+      for f in "$SEED_RESULTS_DIR"/p0_"${names[$k2]}"${msuf}_*_cer.txt \
+               "$SEED_RESULTS_DIR"/p0_"${names[$k2]}"${msuf}_*_wer.txt; do
+        [ -f "$f" ] || continue
+        summary+="$(basename "$f" .txt | sed "s/^p0_${names[$k2]}${msuf}_//")=$(tail -1 "$f" | grep -oE '[0-9.]+%?' | head -1)  "
+      done
+      echo "[p0 $(_now)] DONE ${names[$k2]} ($(_min "${starts[$k2]}")min)  ${summary}"
     else
-      fail=1; echo "[p0] FAILED ${names[$k2]} — tail of ${logs[$k2]}:" >&2; tail -5 "${logs[$k2]}" >&2
+      fail=1; failed_jobs+=("${names[$k2]}")
+      echo "[p0 $(_now)] FAILED ${names[$k2]} after $(_min "${starts[$k2]}")min — last 20 log lines (${logs[$k2]}):" >&2
+      tail -c 8192 "${logs[$k2]}" | tr '\r' '\n' | tail -20 >&2
     fi
   done
 done
-[ "$fail" -eq 0 ] || { echo "[p0] ERROR: some jobs failed (full logs in logs/p0/)" >&2; exit 1; }
+if [ "$fail" -ne 0 ]; then
+  echo "[p0] ERROR: ${#failed_jobs[@]} job(s) failed: ${failed_jobs[*]}" >&2
+  echo "[p0] full logs in logs/p0/ — rerun the SAME command to resume just the failed job(s)" >&2
+  exit 1
+fi
 
 "$PYTHON_BIN" -m audio_dit_quantize.calib.phase0_collect --prefix "p0" --suffix "$msuf" \
   --sets "$SETS_DEV" --out "$SEED_RESULTS_DIR/p0_summary${msuf}.csv"
