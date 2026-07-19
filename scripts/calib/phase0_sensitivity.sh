@@ -87,10 +87,11 @@ job_done() {  # all per-set text-metric result files present AND valid -> job co
     case "$s" in en*) m=wer ;; *) m=cer ;; esac
     f="$SEED_RESULTS_DIR/${tag}_${s}_${m}.txt"
     [ -s "$f" ] || return 1
-    if grep -qi 'nan' "$f"; then
-      # poisoned leftover from a failed eval (e.g. ASR OOM on a shared GPU) — remove it so the
-      # resume re-runs this job instead of silently skipping it
-      echo "[p0] WARN: $f contains nan -> deleting, job ${tag} will re-run" >&2
+    # nan check ONLY on the final aggregate line ("WER: x%"): grepping the whole file
+    # false-positives on English ref/hyp words like "consonant"/"Lieutenant" (bug found
+    # 2026-07-20 — it deleted valid en results and broke resume for every completed job)
+    if tail -1 "$f" | grep -qi 'nan'; then
+      echo "[p0] WARN: $f aggregate is nan -> deleting, job ${tag} will re-run" >&2
       rm -f "$f"; return 1
     fi
   done

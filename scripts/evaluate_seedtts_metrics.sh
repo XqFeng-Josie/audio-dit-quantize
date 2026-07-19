@@ -152,9 +152,12 @@ score_text_metric() {
   echo "---- $score_file ----"
   tail -1 "$score_file"
   # Second guard: a nan can still slip through if every utterance failed ASR (empty merge). Do not
-  # leave a "nan%" file masquerading as a valid metric.
-  if grep -qi 'nan' "$score_file"; then
-    echo "[metrics] ERROR: $score_file contains nan (no validly scored utterances in $gen_dir)." >&2
+  # leave a "nan%" file masquerading as a valid metric. Check ONLY the final aggregate line —
+  # grepping the whole file false-positives on English ref/hyp words containing "nan"
+  # ("consonant", "Lieutenant"), which killed the eval after the text metric on every en_dev run
+  # (root cause of the recurring missing en SIM; found 2026-07-20).
+  if tail -1 "$score_file" | grep -qi 'nan'; then
+    echo "[metrics] ERROR: $score_file aggregate is nan (no validly scored utterances in $gen_dir)." >&2
     exit 1
   fi
 }
