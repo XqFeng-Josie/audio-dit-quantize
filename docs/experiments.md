@@ -42,7 +42,7 @@
 
 > 在音频 DiT 的 PTQ 中，能否**从模型和任务的角度自动选择标定数据**（替代随机抽取/手工启发式），带来可证实的收益——**质量**（超过随机分布均值）、**效率**（更小标定预算达到同等质量）或**鲁棒性**（避开最差随机抽签）三档主张至少其一？
 
-### 2.2 贡献主张（目标形态）
+### 2.2 贡献主张
 
 1. **主线：任务感知的标定数据选择**。定义便宜的逐条/逐集合代理分数（模型侧：激活统计、任务代理梯度影响力；任务侧：音素覆盖、文本难度、说话人多样性、时间步覆盖），做集合级（多样性感知）选择，超过随机与手工基线。
 2. **副线：任务敏感度加权的标定损失**。用任务代理 loss 的梯度统计给 block 重建损失做 token×通道联合加权（region 加权与通道加权的统一框架）。
@@ -167,7 +167,7 @@ FlatQuant 标定流程：32 条标定数据各跑一次全精度推理（16 步 
 | **E0** | 工程解锁 | `--calib_lst` 参数化（含 `SEED_CALIB_LST`）；语料下载；候选池 v1 构建+审计（§3.2.1）；dev/heldtest 划分冻结（§3.2）；Phase 0 驱动 `scripts/calib/phase0_sensitivity.sh` + 收集器 | 全管线冒烟跑通 | **完成**（2026-07-19；过程记录见 §5.2） |
 | ~~E1~~ | ~~污染溢价锚点~~ | ~~干净池随机 32 条 vs 旧列表基线~~ | — | **已取消**（2026-07-19 用户决定：旧列表已删除，不再与其比较；当时的污染审计数字见本文档的 git 历史版本） |
 | **GATE-B** | 敏感性研究（Phase 0） | K=10 组随机 32 条集各"标定+dev 生成+评测"+ fp32 配对参照。这 10 组跑完即转正为论文的**随机 baseline 分布行**与 **best-of-10 参照行** | 组间散布相对总 gap 值得追、且 best-vs-worst 配对显著 → 主线开绿灯 | **完成，开门**（单 seed 协议；结果与指标表见 §4.2，判决见 §4.2.4） |
-| **E2** | 敏感度统计模块 | 捕获态上 Hutchinson 探针反传单步 DiT 输出 → 逐 block 逐通道梯度平方；支持 prompt/生成区分开；按样本聚合出数据影响力分数 | 基础设施，无判定 | 未开始 |
+| **E2** | 候选集打分器 | 一次 FP 捕获（~10–15 min/集，比完整标定便宜 10×）产出三类分数：① 初始 block loss（确定性 loss_first）② 逐样本影响力（生成区任务代理的梯度范数，P2 选择输入）③ 逐通道 Fisher（GATE-A 权重）。实现：`calib/sensitivity/{probes,score,validate}.py`（计算/CLI/校验三层分离） | **验货门**：分数排序须显著复现 14 个已知集的 hard CER 排序（`validate.py`，n=14 时 \|rho\|≳0.53≈p.05） | **代码就绪**（2026-07-20 编译+导入通过；待 GPU 打分 14 集 + 校验。v1 限制：任务代理取末 block 残差流输出而非最终投影头，见包 docstring） |
 | **GATE-A** | 损失加权设计对照 | var 加权（反向 chanbal）/ Fisher 通道加权 / Fisher token×通道，各 vs uniform-MSE（同一标定集 rand32_s0、同 calib_seed，配对 bootstrap） | 出现历史 chanbal 那种"全面、方向一致"的效应 → 副线成立；全在噪声内 → 副线收缩为消融 | 未开始（依赖 E2 的 Fisher 行；var 行只需 `--loss varw` 小改动，需用户确认后实现） |
 | **P1** | 代理特征 → 假设 | 用 GATE-B 的 K 组做"代理分数 → 真实收益"相关性分析（零额外算力；特征含池元数据 + `calib_block_losses.json`）。**仅提假设**，确认走 §3.3-3 的设计对照（首批候选见 §4.2.3-D） | 产出 1–3 个通过设计对照确认的特征 | 首轮预览完成（§4.2.3-D） |
 | **P2** | 集合级选择 + 预算悬崖 | 多样性感知贪心（quality + coverage，含 WavLM 说话人嵌入覆盖项），对照阶梯：随机分布 / best-of-10 / 朴素 top-k / 分层启发式；**集合大小扫描 4/8/16/32（预算悬崖）**；鲁棒性分析（最差抽签兜底） | 质量主张：显著优于随机分布均值；效率主张：选 16 ≥ 随机 32，或 ≥ best-of-10 而无需暴力搜索 | 未开始 |
@@ -261,7 +261,7 @@ FlatQuant 标定流程：32 条标定数据各跑一次全精度推理（16 步 
 3. zh 常规集量化零成本（甚至一致微升），从选择信号中剔除；
 4. 10 组转正为论文的**随机 baseline 分布行**；**s4 为 best-of-10**，`data/calib_pool/sets/rand32_s4.lst` 即日起作为**临时标准标定集**（后续 baseline 类实验默认用它，直到被 P2 产物取代）。
 
-下一步（按优先级）：① P1 三个假设的**设计对照**（en 条数、文本重复性、`sum_loss_first` 信号，各 2 作业）；② E2 敏感度模块开发；③ INT8 参照档（空闲时）；④ en_dev SIM 补评。
+下一步（按优先级）：① P1 三个假设的**设计对照**（en 条数、文本重复性、`sum_loss_first` 信号，各 2 作业）；② E2 敏感度模块开发；
 
 ---
 
@@ -291,6 +291,7 @@ FlatQuant 标定流程：32 条标定数据各跑一次全精度推理（16 步 
 - INT8 参照档：`GPUS=... EVAL_METRICS="wer cer sim" bash scripts/benchmark/benchmark_int8_seedtts.sh 1b "zh_dev,hard_dev,en_dev"`
 - MOS 事后补：`bash scripts/evaluate_seedtts_metrics.sh <gen_root> <tag> "zh_dev hard_dev en_dev" mos`
 - 配对显著性：`python -m audio_dit_quantize.paired_bootstrap --metric cer|sim --a <fp32结果> --b <方法结果>`
+- E2 打分：`python -m audio_dit_quantize.calib.sensitivity.score --calib_lst <lst> --out data/calib_pool/scores/<名字>`（单集 ~10–15 min GPU）；校验：`python -m audio_dit_quantize.calib.sensitivity.validate --scores_dir data/calib_pool/scores`
 - 基线冒烟：`LIMIT=1 bash scripts/benchmark/benchmark_flatquant_best_seedtts.sh 1b hard`
 
 ### 5.4 关键文件索引
