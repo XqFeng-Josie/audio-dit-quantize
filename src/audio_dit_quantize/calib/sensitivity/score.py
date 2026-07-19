@@ -25,7 +25,8 @@ from transformers import AutoTokenizer
 
 from ... import flatquant_layers as fq
 from ...flatquant_best import load_items
-from .probes import aggregate_per_item, capture_tagged, grad_probes, init_losses
+from .probes import (aggregate_per_item, capture_tagged, grad_probes, init_losses,
+                     transfer_and_coverage)
 
 
 def main():
@@ -38,6 +39,9 @@ def main():
     ap.add_argument("--region", default="gen", choices=["gen", "prompt", "all"],
                     help="task-proxy token region (GATE-B: content pathway = gen)")
     ap.add_argument("--seed", type=int, default=0, help="capture noise + probe RNG (mirrors calib_seed)")
+    ap.add_argument("--probe_capture", default=None,
+                    help="probe_capture.pt from sensitivity.probe_capture — enables the v2 scores "
+                         "(sum_transfer_loss, mean_coverage: candidate stats vs hard-like probe set)")
     ap.add_argument("--diag_alpha", type=float, default=0.3)
     ap.add_argument("--device", default="cuda:0")
     args = ap.parse_args()
@@ -63,6 +67,14 @@ def main():
     L = init_losses(model, tagged, dev, diag_alpha=args.diag_alpha)
     print(f"[e2] init losses done ({time.time()-t0:.0f}s)")
 
+    T = cov = None
+    if args.probe_capture:
+        pc = torch.load(args.probe_capture, weights_only=False)
+        print(f"[e2] probe: {pc['meta']['n_seqs']} seqs from {pc['meta']['probe_lst']}")
+        T, cov = transfer_and_coverage(model, tagged, pc["tagged"], dev,
+                                       diag_alpha=args.diag_alpha)
+        print(f"[e2] transfer+coverage done ({time.time()-t0:.0f}s)")
+
     per_item = {}
     for key, vec in (("influence", infl), ("influence_per_token", infl_tok),
                      ("loss_init", L.mean(axis=0))):
@@ -78,14 +90,19 @@ def main():
             "mean_loss_init": float(L.mean()),
             "mean_influence": float(np.mean(infl)),
             "mean_influence_per_token": float(np.mean(infl_tok)),
+            **({"sum_transfer_loss": float(T.sum(axis=0).mean()),   # LOW = good (S prepares P well)
+                "mean_transfer_loss": float(T.mean()),
+                "mean_coverage": float(np.mean(cov))}               # HIGH = good (S spans P's range)
+               if T is not None else {}),
         },
         "per_item": per_item,
     }
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
     with open(args.out + ".json", "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2, ensure_ascii=False)
+    extra = {"transfer_loss": T, "coverage": cov} if T is not None else {}
     np.savez_compressed(args.out + ".npz", init_loss=L, fisher=fisher,
-                        seq_uids=np.array([t[0] for t in tagged]))
+                        seq_uids=np.array([t[0] for t in tagged]), **extra)
     print(f"[e2] set_scores: { {k: round(v, 4) for k, v in payload['set_scores'].items()} }")
     print(f"[e2] -> {args.out}.json / .npz  ({time.time()-t0:.0f}s total)")
 

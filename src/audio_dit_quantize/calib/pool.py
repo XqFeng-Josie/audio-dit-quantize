@@ -519,6 +519,68 @@ def contrast(args):
     print(f"[contrast] shared items: {len(keep)}/{args.n} (single factor = {args.swap} x {args.factor})")
 
 
+# ── probe-set builder (E2 v2 "exam sheet": hard-like content, ZERO overlap with pool) ──
+def probe(args):
+    """Build the PROBE set used by the v2 scorer (coverage / transfer-loss reference).
+    Prompts come from AISHELL-3 speakers NOT used anywhere in the pool; normal target texts are
+    excluded from all pool texts; hardlike texts are freshly generated under a probe-only seed.
+    Zero overlap with pool candidates (by speaker) and with the test set (audit after build)."""
+    import csv as _csv
+    import soundfile as sf
+    pool = Path(args.pool)
+    meta_p = pool.parent / (pool.stem + "_meta.csv")
+    pool_spk, pool_texts = set(), set()
+    for r in _csv.DictReader(open(meta_p, encoding="utf-8")):
+        pool_spk.add(r["spk"]); pool_texts.add(r["target_text"]); pool_texts.add(r["prompt_text"])
+    a3, spk_info = parse_aishell3()
+    a3 = {k: v for k, v in a3.items() if v["spk"] not in pool_spk}
+    print(f"[probe] {len(set(u['spk'] for u in a3.values()))} unused AISHELL-3 speakers available")
+    durs = {}
+    for uid, u in a3.items():
+        try:
+            i = sf.info(str(u["wav"])); durs[uid] = i.frames / i.samplerate
+        except Exception:
+            pass
+    rng = np.random.default_rng(args.seed)
+    out_dir = Path(args.out_dir); wavdir = out_dir / "wavs"
+    wavdir.mkdir(parents=True, exist_ok=True)
+    quota = args.n_normal + args.n_hard
+    acc = select_prompts(a3, durs, spk_info, rng, quota, per_spk=1,
+                         lo=4.0, hi=9.0, target=4.5, wavdir=wavdir)
+    if len(acc) < quota:
+        raise RuntimeError(f"only {len(acc)}/{quota} probe prompts accepted")
+    putts = list(acc)
+    texts, seen = [], set(pool_texts)
+    for uid, u in a3.items():
+        t = u["text"] + "。"
+        if 15 <= len(u["text"]) <= 35 and t not in seen:
+            seen.add(t); texts.append((t, u["spk"]))
+    rng.shuffle(texts)
+    inv = build_char_inventory(a3)
+    hard = [h for h in gen_hardlike(a3, inv, rng, args.n_hard * 2)
+            if h[0] not in pool_texts][:args.n_hard]
+    rows, ti = [], 0
+    for i in range(args.n_normal):
+        putt = putts[i]
+        while ti < len(texts) and texts[ti][1] == a3[putt]["spk"]:
+            ti += 1
+        rows.append((f"prn_{i:03d}", a3[putt]["text"] + "。", f"wavs/{putt}.wav", texts[ti][0]))
+        ti += 1
+    for i, (t, _pys, sub) in enumerate(hard):
+        putt = putts[args.n_normal + i]
+        rows.append((f"prh_{sub[:1]}{i:03d}", a3[putt]["text"] + "。", f"wavs/{putt}.wav", t))
+    lst = out_dir / "probe_v1.lst"
+    with open(lst, "w", encoding="utf-8") as f:
+        for r in rows:
+            f.write("|".join(r) + "\n")
+    used = {r[2].split("/")[-1] for r in rows}
+    for wname, _, _ in acc.values():
+        if wname not in used:
+            (wavdir / wname).unlink(missing_ok=True)
+    print(f"[probe] {len(rows)} items ({args.n_normal} normal + {len(hard)} hardlike) -> {lst}")
+    print(f"[probe] NOW RUN: python -m audio_dit_quantize.calib.audit --lst {lst}")
+
+
 # ── subset sampler (GATE-B random draws) ──────────────────────────────────────
 def sample(args):
     pool = Path(args.pool)
@@ -557,6 +619,12 @@ def main():
     s.add_argument("--n", type=int, default=32)
     s.add_argument("--seed", type=int, required=True)
     s.add_argument("--out", required=True)
+    p = sub.add_parser("probe", help="build the E2 probe set (unused speakers, fresh hardlike, zero pool overlap)")
+    p.add_argument("--pool", required=True)
+    p.add_argument("--n_normal", type=int, default=8)
+    p.add_argument("--n_hard", type=int, default=16)
+    p.add_argument("--seed", type=int, default=777)
+    p.add_argument("--out_dir", default=str(POOL_DIR / "probe"))
     c = sub.add_parser("contrast", help="build a single-factor contrast PAIR of calibration lists")
     c.add_argument("--pool", required=True)
     c.add_argument("--factor", required=True, choices=sorted(_FACTORS))
@@ -569,6 +637,8 @@ def main():
         build(args)
     elif args.cmd == "sample":
         sample(args)
+    elif args.cmd == "probe":
+        probe(args)
     else:
         if args.out_dir is None:
             args.out_dir = str(Path(args.pool).parent / "sets")

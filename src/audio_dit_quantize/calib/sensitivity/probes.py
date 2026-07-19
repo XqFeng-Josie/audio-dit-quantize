@@ -122,6 +122,51 @@ def grad_probes(model, tagged, dev, n_probes=2, seed=0, region="gen"):
     return infl, infl_tok, fisher.numpy()
 
 
+@torch.no_grad()
+def transfer_and_coverage(model, tagged_S, tagged_P, dev, diag_alpha=0.3):
+    """E2 v2 scores — couple the CANDIDATE set S with the fixed PROBE set P (hard-like content):
+
+    transfer loss (design A): per block, initialize the quantizers from S's activation stats
+      (begin_smax on S's fp pass -> sq_style diag init), then measure quant-vs-fp reconstruction
+      error ON P. "Prepare with the S material, quiz on the hard exam sheet."
+    coverage (design C, SelectQ-lineage): per block-output channel, min(1, absmax_S/absmax_P)
+      averaged — the fraction of P's activation range that S's statistics cover. Under-coverage
+      means P's outliers get clipped by S-calibrated scales (the textbook PTQ failure mode).
+
+    Both computed in ONE pass over blocks with official drift-free fp propagation for S and P.
+    Model must be fq.wrap_dit-wrapped. Returns (T[n_blocks, nP_seqs], cov[n_blocks])."""
+    blocks = model.transformer.blocks
+    iS = [x for (_, x, _, _) in tagged_S]; cS = [c for (_, _, c, _) in tagged_S]
+    iP = [x for (_, x, _, _) in tagged_P]; cP = [c for (_, _, c, _) in tagged_P]
+    nS, nP = len(iS), len(iP)
+    T = np.zeros((len(blocks), nP))
+    cov = np.zeros(len(blocks))
+    for bi, blk in enumerate(blocks):
+        ws = _wrappers(blk)
+        for w in ws:
+            w.enable_quant = False
+            w.begin_smax()
+        fS = [blk(x=_move(iS[j], dev), **_move(cS[j], dev)).float() for j in range(nS)]
+        for w in ws:
+            w.init_diag_scale(alpha=diag_alpha)      # quantizer stats come from S ONLY
+        fP = [blk(x=_move(iP[j], dev), **_move(cP[j], dev)).float() for j in range(nP)]
+        amS = torch.stack([f.abs().amax(dim=(0, 1)) for f in fS]).amax(0)
+        amP = torch.stack([f.abs().amax(dim=(0, 1)) for f in fP]).amax(0)
+        cov[bi] = float(torch.clamp(amS / amP.clamp(min=1e-6), max=1.0).mean())
+        for w in ws:
+            w.enable_quant = True
+        for j in range(nP):
+            q = blk(x=_move(iP[j], dev), **_move(cP[j], dev)).float()
+            T[bi, j] = float(((q - fP[j]) ** 2).mean())
+        for w in ws:
+            w.enable_quant = False
+        iS = [f.cpu() for f in fS]
+        iP = [f.cpu() for f in fP]                   # drift-free fp propagation for both streams
+        del fS, fP
+        torch.cuda.empty_cache()
+    return T, cov
+
+
 def aggregate_per_item(tagged, per_seq_values):
     """{uid: mean over that item's captured seqs} for any per-seq score vector."""
     acc, cnt = defaultdict(float), defaultdict(int)

@@ -62,6 +62,7 @@
 |---|---|---|
 | PTQ for Audio Diffusion Transformers（WASPAA 2025，[arXiv:2510.00313](https://arxiv.org/abs/2510.00313)） | Stable Audio Open 上 W8A8/W4A8 静态 vs 动态基准 + timestep 平滑 + SVD-LoRA 分支 | 最近的音频工作，但是通用音频非零样本 TTS、非 W4A4；**无标定数据选择、无任务感知目标、无说话人/内容维度** |
 | Gradient-Aligned Calibration（[arXiv:2602.01289](https://arxiv.org/abs/2602.01289)，2026-02） | 学习标定样本权重以对齐跨 timestep 梯度（图像 UNet 基准） | **思想最近的工作**：纯优化视角（梯度对齐），无任务结构。我们的差异化必须押在语音任务轴上，且节奏要快 |
+| SelectQ（[MIR 2024](https://www.mi-research.net/article/doi/10.1007/s11633-024-1518-0)） | 逐层激活统计聚类选标定数据（CNN/ImageNet，4-bit ResNet18 top-1 +15%），动机同为"随机标定的激活分布失配" | **激活统计选标定的直系前辈，必引**。差异化：它匹配训练集整体分布（聚类近心），我们对任务难例探针做覆盖（E2 v2 设计 C）；域不同（CNN 分类 vs 音频 DiT） |
 | Quant-dLLM / FAIR-Calib（扩散 LLM，2025–26） | masked calibration simulation / 不稳定性重加权 | 佐证"标定分布要与任务/过程对齐"正在成为共识原理；均非语音 |
 | Williams & Aletras 2024；Q-Diffusion / PTQ4DM | LLM 标定数据敏感性；扩散 timestep 采样 | 背景文献：证明了方向、留下了语音空白 |
 
@@ -169,7 +170,7 @@ FlatQuant 标定流程：32 条标定数据各跑一次全精度推理（16 步 
 | **GATE-B** | 敏感性研究（Phase 0） | K=10 组随机 32 条集各"标定+dev 生成+评测"+ fp32 配对参照。这 10 组跑完即转正为论文的**随机 baseline 分布行**与 **best-of-10 参照行** | 组间散布相对总 gap 值得追、且 best-vs-worst 配对显著 → 主线开绿灯 | **完成，开门**（单 seed 协议；结果与指标表见 §4.2，判决见 §4.2.4） |
 | **E2** | 候选集打分器 | 一次 FP 捕获（~10–15 min/集，比完整标定便宜 10×）产出三类分数：① 初始 block loss（确定性 loss_first）② 逐样本影响力（生成区任务代理的梯度范数，P2 选择输入）③ 逐通道 Fisher（GATE-A 权重）。实现：`calib/sensitivity/{probes,score,validate}.py`（计算/CLI/校验三层分离） | **验货门**：分数排序须显著复现 14 个已知集的 hard CER 排序（`validate.py`，n=14 时 \|rho\|≳0.53≈p.05） | **代码就绪**（2026-07-20 编译+导入通过；待 GPU 打分 14 集 + 校验。v1 限制：任务代理取末 block 残差流输出而非最终投影头，见包 docstring） |
 | **GATE-A** | 损失加权设计对照 | var 加权（反向 chanbal）/ Fisher 通道加权 / Fisher token×通道，各 vs uniform-MSE（同一标定集 rand32_s0、同 calib_seed，配对 bootstrap） | 出现历史 chanbal 那种"全面、方向一致"的效应 → 副线成立；全在噪声内 → 副线收缩为消融 | 未开始（依赖 E2 的 Fisher 行；var 行只需 `--loss varw` 小改动，需用户确认后实现） |
-| **P1** | 代理特征 → 假设 | 用 GATE-B 的 K 组做"代理分数 → 真实收益"相关性分析（零额外算力；特征含池元数据 + `calib_block_losses.json`）。**仅提假设**，确认走 §3.3-3 的设计对照（首批候选见 §4.2.3-D） | 产出 1–3 个通过设计对照确认的特征 | 首轮预览完成（§4.2.3-D） |
+| **P1** | 代理特征 → 假设 → 对照确认 | 相关性提假设（§4.2.3-D）→ 单因子对照确认（§4.3） | 产出通过设计对照确认的特征 | **首轮完成**（§4.3）：线索① 否决、线索③ 方向对但欠功效、线索② 域内成立待预注册测试；**意外确认"语言匹配原则"**（en 显著伤 zh，因果） |
 | **P2** | 集合级选择 + 预算悬崖 | 多样性感知贪心（quality + coverage，含 WavLM 说话人嵌入覆盖项），对照阶梯：随机分布 / best-of-10 / 朴素 top-k / 分层启发式；**集合大小扫描 4/8/16/32（预算悬崖）**；鲁棒性分析（最差抽签兜底） | 质量主张：显著优于随机分布均值；效率主张：选 16 ≥ 随机 32，或 ≥ best-of-10 而无需暴力搜索 | 未开始 |
 | **P3** | 泛化确认 | 选中集合迁移 SVDQuant；上 3.5B；untouched test 报最终数 | 增益跨方法/跨规模成立 | 未开始 |
 | INT8 | W8A8 参照档 | dev 集上 int8（无标定、确定性），做退化阶梯 fp32→W8A8→W4A4 + 配对管线阴性对照 | 预期与 fp32 逐条无差 | 命令已就绪，待空闲卡 |
@@ -189,6 +190,8 @@ FlatQuant 标定流程：32 条标定数据各跑一次全精度推理（16 步 
 | ≤2026-07 | 晚期 ODE 步保持激活全精度可恢复 SIM（step-axis 实验，LATE 有效、EARLY 同预算无效） | `scripts/benchmark/benchmark_step_axis_seedtts.sh` | 时间步敏感度不均匀；与 §4.2"SIM 对标定数据不敏感"互证——SIM 靠时间步轴救，不靠数据选择 |
 | ≤2026-07 | **FlatQuant paper-best 与 fp32 的差距已很小（常规集），多个改进方向历史上表现不稳定** | 历史实验（用户经验） | 小效应量作战——催生 §3.3 统计纪律；§4.2 实测证实：余量在 hard CER/en WER，zh CER 无成本，SIM 成本恒定 |
 | 2026-07-19 | （待 seed 对照确认后转正）hard CER 对标定数据选择敏感：best-vs-worst 配对显著 | §4.2 首轮 GATE-B | 主线的存在性证据 |
+| 2026-07-20 | **语言匹配原则（因果，设计对照确认）**：标定集混入 12/32 英文使 zh CER 显著劣化 +0.255；纯 zh 标定集的 zh CER 为全部 run 最佳；反向不对称（加 en 不助 en） | §4.3 en 对照 | 选择方法的硬约束：目标语言轴的标定数据应语言匹配 |
+| 2026-07-20 | E2 影响力分数 v1 = 文本长度代理（病理）；loss_init 仅在随机构成域内预测 hard CER（rho −0.66），不外推到构造集 | §4.4 | 模型侧打分降级为"域内筛选"候选，须过 §4.5 预注册测试才可用 |
 
 ### 4.2 GATE-B 敏感性研究（Phase 0）——首轮，2026-07-19
 
@@ -263,6 +266,67 @@ FlatQuant 标定流程：32 条标定数据各跑一次全精度推理（16 步 
 
 下一步（按优先级）：① P1 三个假设的**设计对照**（en 条数、文本重复性、`sum_loss_first` 信号，各 2 作业）；② E2 敏感度模块开发；
 
+### 4.3 P1 设计对照（en 条数 / hardlike 比例）——2026-07-20
+
+**配置**：两对单因子对照集（`calib/pool.py contrast`，seed=1000）：en 对（A=32 纯 zh，B=20 共享 zh + 12 en）；hardlike 对（A=32 zh_normal，B=16 共享 normal + 16 hardlike）。其余协议同 §4.2。
+
+#### 4.3.1 指标总表
+
+| run | zh CER% | hard CER% | en WER% | zh SIM | hard SIM | en SIM |
+|---|---|---|---|---|---|---|
+| p0_fp32（参照） | 1.452 | 6.929 | 2.868 | 0.811 | 0.791 | 0.760 |
+| p1c_en0 | **1.140** | 7.414 | 3.011 | 0.808 | 0.789 | 0.753 |
+| p1c_en12 | 1.395 | 7.307 | 3.050 | 0.807 | 0.789 | 0.751 |
+| p1c_hard0 | 1.306 | 7.051 | 3.170 | 0.806 | 0.787 | 0.752 |
+| p1c_hard16 | 1.388 | **6.814** | 2.845 | 0.807 | 0.787 | 0.753 |
+
+#### 4.3.2 对内配对 Δ（B−A，95% CI；加粗=显著）
+
+| 对照 | Δzh CER | Δhard CER | Δen WER | ΔSIM（三集） |
+|---|---|---|---|---|
+| en12−en0 | **+0.255 [+0.009,+0.527]** | −0.106 [−0.791,+0.607] | +0.039 [−0.423,+0.520] | 全部 ns |
+| hard16−hard0 | +0.082 [−0.284,+0.477] | −0.238 [−0.825,+0.357] | −0.324 [−0.674,+0.008] | 全部 ns |
+
+#### 4.3.3 分析与判决
+
+- **线索①（en 多→hard 好）未获确认**：hard CER 点估计 −0.106，远小于相关性暗示的幅度且 ns。原 rho=−0.65 判定为淘金假象/混杂。
+- **线索③（hardlike→hard 好）方向正确但未达显著**：−0.238 [−0.825,+0.357]。效应若真实约 0.2–0.3pp，在 n=100 hard 条目下功效不足。
+- **意外的真发现：en 条目显著损害 zh CER（+0.255，SIG）**——标定语言构成对目标语言可懂度存在**因果**影响（纯 zh 集的 zh CER 1.140 为全部 16 个 run 最佳）。方向与假设相反、轴不同，但这是本项目第一个通过设计对照的因果结论：**语言匹配原则**。反向不对称：加 en 不改善 en WER（ns）。
+
+### 4.4 E2 打分器验证——2026-07-20
+
+**实现自检通过**：block 级 init loss 与真实训练日志的 loss_first 相关 0.934、尺度比 0.99（计算正确）；set 级仅 0.45——因为集合间 init loss 的动态范围本身很窄（±4%），两种测量的噪声都不小。
+
+**验货门未过**（n=14，|rho| 需 ≳0.53）：
+
+| 分数 | all14 vs hard CER | 仅 rand10 | 仅对照 4 | 判读 |
+|---|---|---|---|---|
+| sum_loss_init | −0.31 | **−0.66** | +0.20 | 随机构成域内可复现（独立测量重现了 P0 的 −0.65，非日志噪声假象），但**不能外推到构造集**——是域内筛选信号，不是因果准则 |
+| mean_influence | +0.05 | +0.45 | −0.20 | **病理确认**：与目标文本长度 rho=+0.43（本质是长度代理，per-token 化后 CV 从 0.83 降到 0.30 仍残留 0.36）——v1 影响力分数作废 |
+
+**全答案轴矩阵**（2026-07-20 补充，sum_loss_init 的 Spearman；influence 族全轴均无信号不再列）：
+
+| 答案轴 | all14 | rand10 | ctr4 |
+|---|---|---|---|
+| zh CER | −0.10 | −0.33 | +0.00 |
+| **hard CER** | −0.31 | **−0.66** | +0.20 |
+| en WER | +0.24 | +0.09 | +1.00* |
+| SIM（三集） | +0.09~+0.37 | +0.19~+0.48 | ±0.8* |
+
+*ctr4 列 n=4，±1/±0.8 属小样本伪象，不解读。SIM 各轴组间散布≈噪声（std 0.001–0.002），其排序相关无意义。
+
+**解读**：loss_init 是 **hard 专用信号**——不预测 zh CER（−0.33 弱）和 en WER（+0.09≈0）。这与余量地图自洽：zh 无退化可预测（全部 run 优于 fp32）、en 由语言匹配因子主导（§4.3），loss_init 追踪的恰是量化损伤真正所在的轴。预注册测试的结局指标因此**写死为 hard CER**，其余轴仅作次要报告。
+
+**判决**：E2 v1 不能直接进 P2。保留 loss_init 作为"随机域内、hard 轴专用"的筛选候选（§4.5 预注册测试）；influence 需换最终投影头代理重做（v2，暂缓）；Fisher 权重（GATE-A 用）未受影响，待 GATE-A 启动时验证。
+
+**v2 重新出题（2026-07-20，动机：v1 的题目缺陷——给"教材难度"打分而非"预测考分"、集合分数误用逐条平均、探针方向各向同性）**：新增两个把候选集 S 与固定**难例探针集 P** 耦合的分数——`mean_coverage`（设计 C，SelectQ 谱系：S 的逐通道激活范围对 P 的覆盖率，欠覆盖=P 的离群值被 S 标定的尺度裁剪，量化失败的教科书机制；覆盖是并集运算，天然集合级）与 `sum_transfer_loss`（设计 A，交叉验证逻辑：量化器用 S 的统计初始化、在 P 上测重建误差，"用 S 备课、拿 P 试讲"）。探针集 probe_v1：24 条（8 常规+16 新生成难例），prompt 全部来自池外未用的 98 个说话人，与候选、测试集零重叠（审计 PASS）。方向约定：coverage 高=好（vs CER 期望负 rho）、transfer loss 低=好（期望正 rho）。待重打分 14 集过验货门。
+
+### 4.5 综合判读与下一步（2026-07-20）
+
+三条线索两死一弱 + 对照效应普遍小于随机组散布暗示的幅度，指向两个可能世界：**(a) 驱动因子弥散**（好集合是多因子交互，粗粒度构成抓不住）；**(b) 随机组间散布中有相当成分是标定实例噪声**（未测过 seed 方差）。两个世界的后续策略完全不同，判别实验只要 2 个作业（同一集合换 calib_seed）。
+
+可行的前进路径（不互斥）：① **loss_init 筛选式选择的预注册测试**：抽 8 个全新随机集 → 打分（80 min）→ 只对 argmax/argmin 各跑完整标定（2 作业），预注册方向"argmax 的 hard CER 更好"——通过即得到廉价筛选式 P2；② 语言匹配原则纳入选择约束（已因果确认）；③ seed 方差判别实验（2 作业）。
+
 ---
 
 ## 5. 其他
@@ -291,7 +355,8 @@ FlatQuant 标定流程：32 条标定数据各跑一次全精度推理（16 步 
 - INT8 参照档：`GPUS=... EVAL_METRICS="wer cer sim" bash scripts/benchmark/benchmark_int8_seedtts.sh 1b "zh_dev,hard_dev,en_dev"`
 - MOS 事后补：`bash scripts/evaluate_seedtts_metrics.sh <gen_root> <tag> "zh_dev hard_dev en_dev" mos`
 - 配对显著性：`python -m audio_dit_quantize.paired_bootstrap --metric cer|sim --a <fp32结果> --b <方法结果>`
-- E2 打分：`python -m audio_dit_quantize.calib.sensitivity.score --calib_lst <lst> --out data/calib_pool/scores/<名字>`（单集 ~10–15 min GPU）；校验：`python -m audio_dit_quantize.calib.sensitivity.validate --scores_dir data/calib_pool/scores`
+- E2 探针（一次性）：`python -m audio_dit_quantize.calib.pool probe --pool data/calib_pool/pool_v1.lst`（CPU 建集）→ `python -m audio_dit_quantize.calib.sensitivity.probe_capture --probe_lst data/calib_pool/probe/probe_v1.lst --out data/calib_pool/probe/probe_capture.pt`（GPU ~5 min）
+- E2 打分：`python -m audio_dit_quantize.calib.sensitivity.score --calib_lst <lst> --out data/calib_pool/scores_v2/<名字> --probe_capture data/calib_pool/probe/probe_capture.pt`（单集 ~15 min GPU；不带 --probe_capture 则只算 v1 分数）；校验：`python -m audio_dit_quantize.calib.sensitivity.validate --scores_dir data/calib_pool/scores_v2`
 - 基线冒烟：`LIMIT=1 bash scripts/benchmark/benchmark_flatquant_best_seedtts.sh 1b hard`
 
 ### 5.4 关键文件索引

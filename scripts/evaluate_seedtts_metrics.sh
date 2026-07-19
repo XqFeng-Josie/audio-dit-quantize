@@ -220,14 +220,17 @@ run_set() {
     echo "[metrics] set=$setname -> physical GPU $gpu (DEVICE=cuda:0, OMP_NUM_THREADS=${OMP_NUM_THREADS:-default})"
   fi
 
-  if want_metric "$text_metric"; then
-    score_text_metric "$meta" "$gen_dir" "$lang" "$SEED_RESULTS_DIR/${result_prefix}_${metric_suffix}.txt"
-  fi
+  # SIM/MOS run BEFORE the ASR text metric: the text metric's nan guard exits the worker on a
+  # transient Whisper failure, and anything ordered after it never runs (this silently dropped
+  # en_dev SIM for every run of two whole experiment rounds — root-caused 2026-07-20).
   if want_metric sim; then
     score_sim_metric "$meta" "$gen_dir" "$SEED_RESULTS_DIR/${result_prefix}_${setname}_sim.txt"
   fi
   if want_metric mos; then
     score_mos_metrics "$gen_dir" "$setname"
+  fi
+  if want_metric "$text_metric"; then
+    score_text_metric "$meta" "$gen_dir" "$lang" "$SEED_RESULTS_DIR/${result_prefix}_${metric_suffix}.txt"
   fi
 }
 
