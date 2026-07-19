@@ -519,6 +519,54 @@ def contrast(args):
     print(f"[contrast] shared items: {len(keep)}/{args.n} (single factor = {args.swap} x {args.factor})")
 
 
+# ── rule-based selection (P2 构成规则路线; rules = causally-validated constraints only) ──
+def select(args):
+    """Construct a calibration set by VALIDATED composition rules (docs §4.5), random within
+    constraints: no en items (language matching, causal-confirmed), a hardlike quota (directional
+    support, use the tested 50% point), and maximize distinct speakers (free hygiene)."""
+    import csv as _csv
+    pool = Path(args.pool)
+    meta_p = pool.parent / (pool.stem + "_meta.csv")
+    spk_of = {r["uid"]: r["spk"] for r in _csv.DictReader(open(meta_p, encoding="utf-8"))}
+    lines = [l.rstrip("\n") for l in open(pool, encoding="utf-8") if l.strip()]
+    by_uid = {l.split("|")[0]: l for l in lines}
+    rng = np.random.default_rng(args.seed)
+
+    def pick(prefix, k, used_spk):
+        cands = [u for u in by_uid if u.startswith(prefix)]
+        rng.shuffle(cands)
+        chosen = []
+        for u in cands:                                  # pass 1: new speakers first
+            if len(chosen) >= k:
+                break
+            if spk_of[u] not in used_spk:
+                chosen.append(u); used_spk.add(spk_of[u])
+        for u in cands:                                  # pass 2: fill if speakers exhausted
+            if len(chosen) >= k:
+                break
+            if u not in chosen:
+                chosen.append(u)
+        return chosen
+
+    used_spk = set()
+    sel = pick("zhh_", args.n_hard, used_spk) + pick("zhn_", args.n - args.n_hard, used_spk)
+    order = {l.split("|")[0]: i for i, l in enumerate(lines)}
+    sel = sorted(sel, key=order.get)
+    out = Path(args.out)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with open(out, "w", encoding="utf-8") as f:
+        for u in sel:
+            p = by_uid[u].split("|")
+            wav_abs = (pool.parent / p[2]).resolve()
+            p[2] = os.path.relpath(wav_abs, out.parent.resolve())
+            f.write("|".join(p) + "\n")
+    n_spk = len({spk_of[u] for u in sel})
+    comp = defaultdict(int)
+    for u in sel:
+        comp[u.split("_")[0]] += 1
+    print(f"[select] {out.name}: {dict(comp)} | {n_spk}/{len(sel)} distinct speakers | rules: no_en, hardlike={args.n_hard}")
+
+
 # ── probe-set builder (E2 v2 "exam sheet": hard-like content, ZERO overlap with pool) ──
 def probe(args):
     """Build the PROBE set used by the v2 scorer (coverage / transfer-loss reference).
@@ -619,6 +667,12 @@ def main():
     s.add_argument("--n", type=int, default=32)
     s.add_argument("--seed", type=int, required=True)
     s.add_argument("--out", required=True)
+    r = sub.add_parser("select", help="rule-based calibration set (P2: no_en + hardlike quota + max speakers)")
+    r.add_argument("--pool", required=True)
+    r.add_argument("--n", type=int, default=32)
+    r.add_argument("--n_hard", type=int, default=16)
+    r.add_argument("--seed", type=int, required=True)
+    r.add_argument("--out", required=True)
     p = sub.add_parser("probe", help="build the E2 probe set (unused speakers, fresh hardlike, zero pool overlap)")
     p.add_argument("--pool", required=True)
     p.add_argument("--n_normal", type=int, default=8)
@@ -637,6 +691,8 @@ def main():
         build(args)
     elif args.cmd == "sample":
         sample(args)
+    elif args.cmd == "select":
+        select(args)
     elif args.cmd == "probe":
         probe(args)
     else:
