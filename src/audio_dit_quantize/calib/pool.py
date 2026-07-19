@@ -479,6 +479,46 @@ def build(args):
     print("[pool] NOW RUN: python -m audio_dit_quantize.calib.audit --lst", lst_path)
 
 
+# ── single-factor contrast pair builder (P1 hypothesis confirmation, §3.3-3) ──
+_FACTORS = {
+    # factor: (base-pool uid prefixes, swap-in uid prefix, pair name stem)
+    "en":       (("zhn_", "zhh_"), "enn_", "en"),
+    "hardlike": (("zhn_",),        "zhh_", "hard"),
+}
+
+
+def contrast(args):
+    """Build a PAIR of calibration lists that differ in exactly ONE composition factor:
+    set A = `n` items from the base pool (factor absent); set B = the same A minus `swap`
+    random items, plus `swap` items of the factor style. The (n−swap) shared items make the
+    comparison a designed single-factor contrast (max power at 2 jobs, docs §3.3-3)."""
+    base_pre, swap_pre, stem = _FACTORS[args.factor]
+    pool = Path(args.pool)
+    lines = [l.rstrip("\n") for l in open(pool, encoding="utf-8") if l.strip()]
+    order = {l.split("|")[0]: i for i, l in enumerate(lines)}
+    by_uid = {l.split("|")[0]: l for l in lines}
+    base = sorted([u for u in by_uid if u.startswith(base_pre)], key=order.get)
+    swap_in = sorted([u for u in by_uid if u.startswith(swap_pre)], key=order.get)
+    rng = np.random.default_rng(args.seed)
+    A = sorted(rng.choice(base, size=args.n, replace=False), key=order.get)
+    keep = sorted(rng.choice(A, size=args.n - args.swap, replace=False), key=order.get)
+    B = sorted(list(keep) + list(rng.choice(swap_in, size=args.swap, replace=False)), key=order.get)
+    out_dir = Path(args.out_dir); out_dir.mkdir(parents=True, exist_ok=True)
+    for tag, sel in ((f"ctr_{stem}0_s{args.seed}", A), (f"ctr_{stem}{args.swap}_s{args.seed}", B)):
+        out = out_dir / f"{tag}.lst"
+        with open(out, "w", encoding="utf-8") as f:
+            for u in sel:
+                p = by_uid[u].split("|")
+                wav_abs = (pool.parent / p[2]).resolve()
+                p[2] = os.path.relpath(wav_abs, out_dir.resolve())
+                f.write("|".join(p) + "\n")
+        comp = defaultdict(int)
+        for u in sel:
+            comp[u.split("_")[0]] += 1
+        print(f"[contrast] {out.name}: {dict(comp)}")
+    print(f"[contrast] shared items: {len(keep)}/{args.n} (single factor = {args.swap} x {args.factor})")
+
+
 # ── subset sampler (GATE-B random draws) ──────────────────────────────────────
 def sample(args):
     pool = Path(args.pool)
@@ -517,11 +557,22 @@ def main():
     s.add_argument("--n", type=int, default=32)
     s.add_argument("--seed", type=int, required=True)
     s.add_argument("--out", required=True)
+    c = sub.add_parser("contrast", help="build a single-factor contrast PAIR of calibration lists")
+    c.add_argument("--pool", required=True)
+    c.add_argument("--factor", required=True, choices=sorted(_FACTORS))
+    c.add_argument("--n", type=int, default=32)
+    c.add_argument("--swap", type=int, required=True, help="how many base items are replaced by factor items in set B")
+    c.add_argument("--seed", type=int, default=1000)
+    c.add_argument("--out_dir", default=None, help="default: <pool_dir>/sets")
     args = ap.parse_args()
     if args.cmd == "build":
         build(args)
-    else:
+    elif args.cmd == "sample":
         sample(args)
+    else:
+        if args.out_dir is None:
+            args.out_dir = str(Path(args.pool).parent / "sets")
+        contrast(args)
 
 
 if __name__ == "__main__":
