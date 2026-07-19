@@ -55,8 +55,10 @@ def paired_bootstrap(a, b, higher_better, n_boot=10000, seed=0, ci=95.0, scale=1
     boot = d[idx].mean(axis=1)
     lo, hi = np.percentile(boot, [(100 - ci) / 2, 100 - (100 - ci) / 2])
     p_better = float((boot > 0).mean()) if higher_better else float((boot < 0).mean())
-    sig = (lo > 0) if higher_better else (hi < 0)   # CI excludes 0 on the "better" side
-    return dict(mean=d.mean(), lo=lo, hi=hi, p_better=p_better, sig=sig, std=d.std(), n=n)
+    sig = (lo > 0) if higher_better else (hi < 0)         # CI excludes 0, B better
+    sig_worse = (hi < 0) if higher_better else (lo > 0)   # CI excludes 0, B worse
+    return dict(mean=d.mean(), lo=lo, hi=hi, p_better=p_better, sig=sig, sig_worse=sig_worse,
+                std=d.std(), n=n)
 
 
 def main():
@@ -88,8 +90,10 @@ def main():
     print(f"  Δ (B−A) = {r['mean']*(1 if args.metric=='sim' else 1):+.4f}{unit}   "
           f"{args.ci:.0f}% CI [{r['lo']:+.4f}, {r['hi']:+.4f}]")
     print(f"  P({args.labels[1]} {dirw}=better) = {r['p_better']:.3f}   per-item std = {r['std']:.4f}")
-    print(f"  VERDICT: {'SIGNIFICANT — CI excludes 0 ✅' if r['sig'] else 'ns — CI crosses 0'} "
-          f"(fixed protocol + fixed calib draw)")
+    verdict = (f"SIGNIFICANT — {args.labels[1]} better, CI excludes 0 ✅" if r["sig"] else
+               f"SIGNIFICANT — {args.labels[1]} WORSE, CI excludes 0 ⚠️" if r["sig_worse"] else
+               "ns — CI crosses 0")
+    print(f"  VERDICT: {verdict} (fixed protocol + fixed calib draw)")
 
 
 if __name__ == "__main__":

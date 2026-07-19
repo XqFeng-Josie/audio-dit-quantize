@@ -39,3 +39,6 @@ onnxruntime==1.27.0
 # --- tooling: data download + dashboard xlsx reader ---
 gdown==6.1.0
 openpyxl==3.1.5          # build_dashboard.py reads docs/*.xlsx
+
+# --- calib-data research line: offline error-type attribution (calib/error_taxonomy.py) ---
+pypinyin==0.55.0
