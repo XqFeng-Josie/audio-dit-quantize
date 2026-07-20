@@ -8,6 +8,11 @@ gating ONLY the ODE-step at which activations are quantized (weights stay int4 t
 The per-step gate flips `flatquant_layers._ACT_QUANT` via a transformer forward-pre-hook
 (step = fwd // 2, because CFG runs 2 forwards — cond+uncond — per Euler step).
 
+MODULE AXIS (M1, docs §3.4): configs xattn / sattn / ffnfp keep ONE block class (cross_attn /
+self_attn / ffn) at fp activation across ALL steps via the per-linear `_act_on` flag; late_xattn
+combines both axes (the candidate task-aligned recipe). Same fixed model, so every config pairs
+item-wise with `full` free of calibration-instance noise.
+
 FIXED CALIBRATION MODEL (ONE model, shared with the efficiency deploy experiments): models/bc_{1b,3p5b}_model.pt
   - default: LOAD it, so full/early/late compare the SAME model — that identity is the whole point of the control.
   - --calibrate: PRODUCE it once (best-config recipe: per-block recon + LWC + LAC + add_diag, calib_seed 0,
@@ -38,13 +43,39 @@ from .paths import CALIB_LST, DATA_DIR, GEN_DIR, SETS, bc_model_path
 
 DATA = str(DATA_DIR)
 NSTEPS, FPS = 15, 2   # 15 Euler steps; 2 network forwards/step (CFG cond+uncond)
+# config = (fp-activation ODE steps, fp-activation module classes). Step axis and module axis are
+# orthogonal gates on the SAME loaded model: steps flip fq._ACT_QUANT per forward (hook), module
+# classes flip the per-linear _act_on flag (M1, docs §3.4). Weights stay int4 in every config.
 CONFIGS = {
-    "full":  set(),                    # every step quantizes activation (W4A4 baseline)
-    "early": set(range(0, 5)),         # steps 0-4 fp activation  (equal-budget control)
-    "late":  set(range(10, NSTEPS)),   # steps 10-14 fp activation (the method)
-    "mid":   set(range(5, 10)),        # steps 5-9 fp activation   (position control)
-    "noact": set(range(NSTEPS)),       # all steps fp activation   (weight-only W4 ceiling)
+    "full":  (set(), ()),                     # every step quantizes activation (W4A4 baseline)
+    "early": (set(range(0, 5)), ()),          # steps 0-4 fp activation  (equal-budget control)
+    "late":  (set(range(10, NSTEPS)), ()),    # steps 10-14 fp activation (the step-axis method)
+    "mid":   (set(range(5, 10)), ()),         # steps 5-9 fp activation   (position control)
+    "noact": (set(range(NSTEPS)), ()),        # all steps fp activation   (weight-only W4 ceiling)
+    # M1 module axis (all steps quantize; ONE block class runs fp activation)
+    "xattn": (set(), ("cross_attn",)),        # mechanism hypothesis target (repeat-collapse §4.7)
+    "sattn": (set(), ("self_attn",)),         # control
+    "ffnfp": (set(), ("ffn",)),               # control (largest param share)
+    # candidate combined recipe: late steps for SIM + cross-attn for intelligibility
+    "late_xattn": (set(range(10, NSTEPS)), ("cross_attn",)),
 }
+
+
+def set_act_fp_modules(model, classes):
+    """M1 module-axis gate: every FlatQuantLinear whose module path crosses one of `classes`
+    (self_attn / cross_attn / ffn) runs fp activation (weight stays int4) via the per-linear
+    _act_on flag. Returns the act-fp fraction of wrapped params (budget bookkeeping)."""
+    import re
+    pat = re.compile(r"\.(%s)\." % "|".join(classes)) if classes else None
+    tot = fp = 0
+    for name, m in model.transformer.named_modules():
+        if isinstance(m, fq.FlatQuantLinear):
+            off = bool(pat and pat.search("." + name + "."))
+            m._act_on = not off
+            n = m.linear.weight.numel()
+            tot += n
+            fp += n if off else 0
+    return fp / max(tot, 1)
 
 def _valid_wav(wav):
     """Finite + not degenerate all-(near)zero. A protected/quantized step combination that silently
@@ -167,11 +198,15 @@ def main():
         items = _all[args.offset:(args.offset + args.limit) if args.limit else None]
         eff_base = args.base + args.offset   # seed = base+offset+idx -> matches a single full-set run's per-item seeds
         for c in configs:
+            protect, mods = CONFIGS[c]
+            frac = set_act_fp_modules(model, mods)
             outdir = os.path.join(str(GEN_DIR), args.out_subdir, c, setname)
             dt = gen_config(model, tok, dev, items, eff_base, outdir,
-                            args.nfe, args.cfg_strength, args.guidance, CONFIGS[c])
-            print(f"[gen] {setname}/{c}: protect-steps {sorted(CONFIGS[c]) or '[]'} "
+                            args.nfe, args.cfg_strength, args.guidance, protect)
+            print(f"[gen] {setname}/{c}: protect-steps {sorted(protect) or '[]'} "
+                  f"mods-fp {list(mods) or '[]'} (act-fp param frac {frac:.2f}) "
                   f"-> {len(items)} items in {dt:.0f}s -> {outdir}", flush=True)
+    set_act_fp_modules(model, ())   # reset module gates
     h.remove()
     print("STEP-AXIS GEN DONE")
 

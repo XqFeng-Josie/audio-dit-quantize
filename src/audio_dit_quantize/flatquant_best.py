@@ -199,19 +199,21 @@ def calibrate_perblock(model, store, dev, steps=200, mb=4, lr=5e-3, clip_lr=5e-2
         for s in range(steps):
             perm = torch.randperm(n)[:mb].tolist()
             opt.zero_grad()
-            for w in ws:
-                w.set_wq_cache()        # one differentiable qweight reused across the mini-batch
-            loss = 0.0
-            for j in perm:
-                out = blk(x=_move(inps[j], dev), **_move(conds[j], dev))
-                tgt = fp_outs[j].to(dev)
-                se = (out - tgt) ** 2
-                if wtoks is not None:
-                    se = wtoks[j][None, :, None] * se       # per-token region weight (broadcast over channels)
-                loss = loss + (se.mean() if cbw is None else (cbw * se).mean())
-            loss = loss / len(perm)
-            blk_losses.append(float(loss.detach()))
-            (loss / loss.detach().clamp(min=1e-12)).backward()
+            # grad explicitly enabled: some callers run under @torch.no_grad() (generate_step_axis)
+            with torch.enable_grad():
+                for w in ws:
+                    w.set_wq_cache()        # one differentiable qweight reused across the mini-batch
+                loss = 0.0
+                for j in perm:
+                    out = blk(x=_move(inps[j], dev), **_move(conds[j], dev))
+                    tgt = fp_outs[j].to(dev)
+                    se = (out - tgt) ** 2
+                    if wtoks is not None:
+                        se = wtoks[j][None, :, None] * se       # per-token region weight (broadcast over channels)
+                    loss = loss + (se.mean() if cbw is None else (cbw * se).mean())
+                loss = loss / len(perm)
+                blk_losses.append(float(loss.detach()))
+                (loss / loss.detach().clamp(min=1e-12)).backward()
             opt.step(); sched.step()
             for w in ws:
                 w.clear_wq_cache()

@@ -567,6 +567,73 @@ def select(args):
     print(f"[select] {out.name}: {dict(comp)} | {n_spk}/{len(sel)} distinct speakers | rules: no_en, hardlike={args.n_hard}")
 
 
+# ── speaker-concentration contrast (§2.5 说话人结构, W3; pre-authorized 2026-07-19) ──
+def spkctr(args):
+    """Single-factor speaker-structure contrast: sets A and B carry IDENTICAL target texts
+    (n_hard hardlike + rest normal, no en) and differ ONLY in prompt speaker structure —
+    A = one prompt per speaker across `spk_a` speakers (max diversity, mirrors rule32),
+    B = two prompts per speaker across `spk_b` speakers, B's speakers nested inside A's.
+    Re-pairing keeps the pool protocol: target text source speaker != prompt speaker."""
+    import csv as _csv
+    pool = Path(args.pool)
+    meta_p = pool.parent / (pool.stem + "_meta.csv")
+    spk_of, tsrc_spk = {}, {}
+    for r in _csv.DictReader(open(meta_p, encoding="utf-8")):
+        spk_of[r["uid"]] = r["spk"]
+        src = (r.get("target_src") or "").strip()
+        tsrc_spk[r["uid"]] = src[:7] if src.startswith("SSB") else None   # None = synthetic text
+    lines = [l.rstrip("\n") for l in open(pool, encoding="utf-8") if l.strip()]
+    by_uid = {l.split("|")[0]: l for l in lines}
+    order = {l.split("|")[0]: i for i, l in enumerate(lines)}
+    rng = np.random.default_rng(args.seed)
+
+    zhn_by_spk = defaultdict(list)
+    for u in sorted((u for u in by_uid if u.startswith("zhn_")), key=order.get):
+        zhn_by_spk[spk_of[u]].append(u)
+    spk2 = sorted(s for s, us in zhn_by_spk.items() if len(us) >= 2)
+    if len(spk2) < args.spk_a:
+        raise RuntimeError(f"need {args.spk_a} speakers with >=2 prompts, have {len(spk2)}")
+    A_spk = list(rng.choice(spk2, size=args.spk_a, replace=False))
+    B_spk = list(rng.choice(A_spk, size=args.spk_b, replace=False))          # nested
+    prompts_A = [zhn_by_spk[s][rng.integers(2)] for s in A_spk]              # 1 per speaker
+    prompts_B = [u for s in B_spk for u in zhn_by_spk[s][:2]]                # 2 per speaker
+
+    texts = (list(rng.choice(sorted((u for u in by_uid if u.startswith("zhh_")), key=order.get),
+                             size=args.n_hard, replace=False))
+             + list(rng.choice(sorted((u for u in by_uid if u.startswith("zhn_")), key=order.get),
+                               size=args.n - args.n_hard, replace=False)))
+
+    def pair_and_write(tag, prompt_uids):
+        pu = list(prompt_uids)
+        rng.shuffle(pu)
+        for i in range(len(pu)):                          # fix cross-speaker violations by swap
+            if tsrc_spk[texts[i]] == spk_of[pu[i]]:
+                for j in range(len(pu)):
+                    if (j != i and tsrc_spk[texts[i]] != spk_of[pu[j]]
+                            and tsrc_spk[texts[j]] != spk_of[pu[i]]):
+                        pu[i], pu[j] = pu[j], pu[i]
+                        break
+        assert all(tsrc_spk[texts[i]] != spk_of[pu[i]] for i in range(len(pu)))
+        out_dir = Path(args.out_dir); out_dir.mkdir(parents=True, exist_ok=True)
+        out = out_dir / f"{tag}.lst"
+        with open(out, "w", encoding="utf-8") as f, \
+             open(out_dir / f"{tag}.map.csv", "w", encoding="utf-8") as m:
+            m.write("uid,text_donor,prompt_donor,prompt_spk,target_src_spk\n")
+            for i in range(len(pu)):
+                t, p = by_uid[texts[i]].split("|"), by_uid[pu[i]].split("|")
+                wav_abs = (pool.parent / p[2]).resolve()
+                uid = f"{tag.split('_')[1]}_{i:04d}"
+                f.write("|".join([uid, t[1], os.path.relpath(wav_abs, out_dir.resolve()), p[3]]) + "\n")
+                m.write(f"{uid},{texts[i]},{pu[i]},{spk_of[pu[i]]},{tsrc_spk[texts[i]] or ''}\n")
+        spks = [spk_of[u] for u in pu]
+        print(f"[spkctr] {out.name}: {len(pu)} items | {len(set(spks))} speakers, "
+              f"max/spk={max(spks.count(s) for s in set(spks))} | texts: "
+              f"{args.n_hard} hardlike + {args.n - args.n_hard} normal (identical across pair)")
+
+    pair_and_write(f"ctr_spk{args.spk_a}_s{args.seed}", prompts_A)
+    pair_and_write(f"ctr_spk{args.spk_b}_s{args.seed}", prompts_B)
+
+
 # ── probe-set builder (E2 v2 "exam sheet": hard-like content, ZERO overlap with pool) ──
 def probe(args):
     """Build the PROBE set used by the v2 scorer (coverage / transfer-loss reference).
@@ -679,6 +746,14 @@ def main():
     p.add_argument("--n_hard", type=int, default=16)
     p.add_argument("--seed", type=int, default=777)
     p.add_argument("--out_dir", default=str(POOL_DIR / "probe"))
+    k = sub.add_parser("spkctr", help="speaker-concentration contrast pair (identical texts, W3)")
+    k.add_argument("--pool", required=True)
+    k.add_argument("--n", type=int, default=32)
+    k.add_argument("--n_hard", type=int, default=16)
+    k.add_argument("--spk_a", type=int, default=32, help="speakers in the diverse set (1 prompt each)")
+    k.add_argument("--spk_b", type=int, default=16, help="speakers in the concentrated set (2 prompts each)")
+    k.add_argument("--seed", type=int, required=True)
+    k.add_argument("--out_dir", default=None, help="default: <pool_dir>/sets")
     c = sub.add_parser("contrast", help="build a single-factor contrast PAIR of calibration lists")
     c.add_argument("--pool", required=True)
     c.add_argument("--factor", required=True, choices=sorted(_FACTORS))
@@ -695,6 +770,10 @@ def main():
         select(args)
     elif args.cmd == "probe":
         probe(args)
+    elif args.cmd == "spkctr":
+        if args.out_dir is None:
+            args.out_dir = str(Path(args.pool).parent / "sets")
+        spkctr(args)
     else:
         if args.out_dir is None:
             args.out_dir = str(Path(args.pool).parent / "sets")
