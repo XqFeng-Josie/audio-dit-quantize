@@ -113,10 +113,11 @@ def _block_wrappers(block):
     return [m for m in block.modules() if isinstance(m, fq.FlatQuantLinear)]
 
 
-def _chanbal_weight(fp_outs, dev):
-    """Per-(hidden)channel inverse-variance weight for the block-output MSE — the per-block analog of
-    the docs/11 channel-balanced loss (normalize each output channel by its variance so high-variance
-    channels don't dominate). Computed once per block from the fp target, mean-normalized to keep scale."""
+def _chanbal_weight(fp_outs, dev, invert=True):
+    """Per-(hidden)channel variance-based weight for the block-output MSE, computed once per block from
+    the fp target, mean-normalized to keep scale. invert=True -> inverse-variance (chanbal, docs/11:
+    high-variance channels don't dominate). invert=False -> variance (varw, M3): EMPHASIZE high-variance
+    channels — the reversed-direction hypothesis (§4.1: 1/var hurt at per-block; test if var helps)."""
     s = ss = None; n = 0
     for f in fp_outs:
         ff = f.reshape(-1, f.shape[-1]).double()
@@ -124,7 +125,7 @@ def _chanbal_weight(fp_outs, dev):
         ss = (ff ** 2).sum(0) if ss is None else ss + (ff ** 2).sum(0)
         n += ff.shape[0]
     var = (ss / n - (s / n) ** 2).clamp(min=1e-6)
-    w = (1.0 / var).float()
+    w = (1.0 / var if invert else var).float()
     return (w / w.mean()).to(dev)          # [dim]
 
 
@@ -134,7 +135,7 @@ def calibrate_perblock(model, store, dev, steps=200, mb=4, lr=5e-3, clip_lr=5e-2
     """stats_out: optional JSON path — records per-block first/last/min training loss. These are
     cheap calibration-set-quality signals for the P1 proxy-feature regression (computable without
     any generation/eval). Pure logging: the training math is untouched."""
-    assert loss_type in ("mse", "chanbal")
+    assert loss_type in ("mse", "chanbal", "varw")
     blocks = model.transformer.blocks
     for p in model.parameters():              # only the per-block quant params train; freeze the rest
         p.requires_grad_(False)
@@ -179,7 +180,8 @@ def calibrate_perblock(model, store, dev, steps=200, mb=4, lr=5e-3, clip_lr=5e-2
             w.enable_quant = True
             if diag_init:
                 w.init_diag_scale(alpha=diag_alpha)
-        cbw = _chanbal_weight(fp_outs, dev) if loss_type == "chanbal" else None   # [dim] or None
+        cbw = (_chanbal_weight(fp_outs, dev, invert=(loss_type == "chanbal"))
+               if loss_type in ("chanbal", "varw") else None)   # [dim] or None
         # 2) train block's quant params to match fp_out (block output MSE, optionally chan-balanced)
         trans_p, clip_p = [], []
         for w in ws:
@@ -265,9 +267,10 @@ def main():
     ap.add_argument("--mb", type=int, default=4)
     ap.add_argument("--lr", type=float, default=5e-3)
     ap.add_argument("--clip_lr", type=float, default=5e-2)
-    ap.add_argument("--loss", default="mse", choices=["mse", "chanbal"],
-                    help="per-block reconstruction objective: mse (default) or chanbal "
-                         "(per-hidden-channel inverse-variance weighted block-output MSE)")
+    ap.add_argument("--loss", default="mse", choices=["mse", "chanbal", "varw"],
+                    help="per-block reconstruction objective: mse (default) / chanbal "
+                         "(per-hidden-channel inverse-variance weighted) / varw (M3: variance-weighted, "
+                         "the reversed-direction channel-sensitivity hypothesis)")
     ap.add_argument("--region_gen_w", type=float, default=1.0,
                     help="per-token weight for the GENERATION region ([prompt_dur:]) in the block MSE. "
                          ">1 up-weights synthesis (LEAD 2, targets CER/coverage). 1.0 = off.")
