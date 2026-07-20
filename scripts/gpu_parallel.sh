@@ -87,7 +87,14 @@ run_gen_parallel() {
   local POOL; read -r -a POOL <<< "$(gpu_pool)"; local NG="${#POOL[@]}"
 
   if [ "$NG" -le 1 ]; then
-    ( "$cb" "$(echo "$sets" | tr ' ' ',')" 0 "$ulimit" "" )
+    # single-GPU path must still pin the worker to the pool's GPU — bare invocation would let
+    # `--device cuda:0` land on PHYSICAL 0 and silently ignore the GPUS knob
+    local g0="${POOL[0]:-}"
+    if [ -n "$g0" ]; then
+      ( export CUDA_VISIBLE_DEVICES="$g0" DEVICE="cuda:0"; "$cb" "$(echo "$sets" | tr ' ' ',')" 0 "$ulimit" "$g0" )
+    else
+      ( "$cb" "$(echo "$sets" | tr ' ' ',')" 0 "$ulimit" "" )
+    fi
     return $?
   fi
 
