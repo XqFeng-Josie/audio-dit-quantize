@@ -43,39 +43,63 @@ from .paths import CALIB_LST, DATA_DIR, GEN_DIR, SETS, bc_model_path
 
 DATA = str(DATA_DIR)
 NSTEPS, FPS = 15, 2   # 15 Euler steps; 2 network forwards/step (CFG cond+uncond)
-# config = (fp-activation ODE steps, fp-activation module classes). Step axis and module axis are
-# orthogonal gates on the SAME loaded model: steps flip fq._ACT_QUANT per forward (hook), module
-# classes flip the per-linear _act_on flag (M1, docs §3.4). Weights stay int4 in every config.
+TAGS = ("cross_attn", "self_attn", "ffn")   # the three wrapped module classes
+ALL = frozenset(TAGS)
+# A config is a list of RULES; each rule = (steps, mods) with None = "all". A wrapped linear runs
+# fp activation at step t iff ANY rule matches: (steps is None or t in steps) AND the linear's module
+# class is in (mods or ALL). Weights stay int4 in every config. This unifies the step axis (rule with
+# mods=None) and the module axis (rule with steps=None); a SINGLE rule with both set is an INTERSECTION
+# (e.g. late_ffn: FFN fp on late steps only), while TWO rules are a UNION (e.g. late_xattn). The gate
+# reduces to fq._ACT_QUANT (all-fp step, fast path) + per-linear _act_on (partial step), unchanged in
+# flatquant_layers. Behaviour of every pre-existing config is identical to the old two-gate form.
+_L = frozenset(range(10, NSTEPS))
 CONFIGS = {
-    "full":  (set(), ()),                     # every step quantizes activation (W4A4 baseline)
-    "early": (set(range(0, 5)), ()),          # steps 0-4 fp activation  (equal-budget control)
-    "late":  (set(range(10, NSTEPS)), ()),    # steps 10-14 fp activation (the step-axis method)
-    "mid":   (set(range(5, 10)), ()),         # steps 5-9 fp activation   (position control)
-    "noact": (set(range(NSTEPS)), ()),        # all steps fp activation   (weight-only W4 ceiling)
-    # M1 module axis (all steps quantize; ONE block class runs fp activation)
-    "xattn": (set(), ("cross_attn",)),        # mechanism hypothesis target (repeat-collapse §4.7)
-    "sattn": (set(), ("self_attn",)),         # control
-    "ffnfp": (set(), ("ffn",)),               # control (largest param share)
-    # candidate combined recipe: late steps for SIM + cross-attn for intelligibility
-    "late_xattn": (set(range(10, NSTEPS)), ("cross_attn",)),
+    "full":       [],                              # every step quantizes activation (W4A4 baseline)
+    "early":      [(frozenset(range(0, 5)), None)],   # steps 0-4 fp   (equal-budget control)
+    "late":       [(_L, None)],                    # steps 10-14 fp (the step-axis method)
+    "mid":        [(frozenset(range(5, 10)), None)],  # steps 5-9 fp   (position control)
+    "noact":      [(None, None)],                  # all steps fp   (weight-only W4 ceiling)
+    # M1 module axis (all steps; ONE class runs fp activation)
+    "xattn":      [(None, frozenset(["cross_attn"]))],   # mechanism target (repeat-collapse §4.7)
+    "sattn":      [(None, frozenset(["self_attn"]))],    # control
+    "ffnfp":      [(None, frozenset(["ffn"]))],          # control (SIM carrier, §4.15)
+    # combined recipes
+    "late_xattn": [(_L, None), (None, frozenset(["cross_attn"]))],  # UNION: late steps + cross-attn
+    # efficiency-frontier recipe (§4.15.3): FFN carries SIM; keep it fp on the late steps ONLY
+    # (~1/6 activation-fp budget) — INTERSECTION, tests if ffnfp's SIM gain survives the cheap combo.
+    "late_ffn":   [(_L, frozenset(["ffn"]))],
 }
 
 
-def set_act_fp_modules(model, classes):
-    """M1 module-axis gate: every FlatQuantLinear whose module path crosses one of `classes`
-    (self_attn / cross_attn / ffn) runs fp activation (weight stays int4) via the per-linear
-    _act_on flag. Returns the act-fp fraction of wrapped params (budget bookkeeping)."""
+def _fp_tags_at(rules, step):
+    """Set of module tags that run fp activation at this step (union over matching rules)."""
+    out = set()
+    for steps, mods in rules:
+        if steps is None or step in steps:
+            out |= ALL if mods is None else set(mods)
+    return out
+
+
+def tag_linears(model):
+    """Stamp each wrapped FlatQuantLinear with its module class (_mod_tag) once, and return
+    {tag: param_count} for budget bookkeeping. Idempotent."""
     import re
-    pat = re.compile(r"\.(%s)\." % "|".join(classes)) if classes else None
-    tot = fp = 0
+    pat = re.compile(r"\.(%s)\." % "|".join(TAGS))
+    counts = {t: 0 for t in TAGS}
     for name, m in model.transformer.named_modules():
         if isinstance(m, fq.FlatQuantLinear):
-            off = bool(pat and pat.search("." + name + "."))
-            m._act_on = not off
-            n = m.linear.weight.numel()
-            tot += n
-            fp += n if off else 0
-    return fp / max(tot, 1)
+            hit = pat.search("." + name + ".")
+            m._mod_tag = hit.group(1) if hit else None
+            if m._mod_tag:
+                counts[m._mod_tag] += m.linear.weight.numel()
+    return counts
+
+
+def budget_frac(rules, counts):
+    """Mean-over-steps fraction of wrapped params running fp activation."""
+    tot = sum(counts.values()) or 1
+    return sum(sum(counts[t] for t in _fp_tags_at(rules, s)) for s in range(NSTEPS)) / (NSTEPS * tot)
+
 
 def _valid_wav(wav):
     """Finite + not degenerate all-(near)zero. A protected/quantized step combination that silently
@@ -84,18 +108,31 @@ def _valid_wav(wav):
     return arr.size > 0 and np.isfinite(arr).all() and float(np.abs(arr).max()) > 1e-6
 
 
-_st = {"fwd": 0, "protect": set()}
-def _hook(*_a):
+_st = {"fwd": 0, "rules": [], "last": None}
+def _hook(module, *_a):
     step = _st["fwd"] // FPS
-    fq._ACT_QUANT = step not in _st["protect"]   # protected step -> fp activation (weight stays int4)
+    tags = _fp_tags_at(_st["rules"], step)
+    if tags >= ALL:                          # whole model fp this step -> fast global gate
+        fq._ACT_QUANT = False
+    else:
+        fq._ACT_QUANT = True
+        if tags != _st["last"]:              # re-stamp per-linear gates only when the set changes
+            for m in module.modules():
+                if isinstance(m, fq.FlatQuantLinear):
+                    m._act_on = m._mod_tag not in tags
+            _st["last"] = frozenset(tags)
     _st["fwd"] += 1
 
 
 @torch.no_grad()
-def gen_config(model, tok, dev, items, base, outdir, nfe, cfg, guid, protect):
-    """Generate one config (one protect-set) for one set. Per-item seed = base + idx (order-free)."""
+def gen_config(model, tok, dev, items, base, outdir, nfe, cfg, guid, rules):
+    """Generate one config (one rule list) for one set. Per-item seed = base + idx (order-free)."""
     os.makedirs(outdir, exist_ok=True)
-    _st["protect"] = protect
+    _st["rules"] = rules
+    _st["last"] = None
+    for m in model.transformer.modules():           # reset module gates (no cross-config contamination)
+        if isinstance(m, fq.FlatQuantLinear):
+            m._act_on = True
     t0 = time.time()
     n_invalid = n_err = 0
     for idx, (uid, pt, pwa, gt) in enumerate(items):
@@ -192,21 +229,21 @@ def main():
             raise SystemExit(f"unknown config '{c}'; choose from {list(CONFIGS)}")
     sets = [s.strip() for s in args.sets.split(",") if s.strip()]
 
+    counts = tag_linears(model)      # stamp _mod_tag on every wrapped linear + param counts
     h = model.transformer.register_forward_pre_hook(_hook)
     for setname in sets:
         _all = pb.load_items(os.path.join(DATA, SETS[setname]))
         items = _all[args.offset:(args.offset + args.limit) if args.limit else None]
         eff_base = args.base + args.offset   # seed = base+offset+idx -> matches a single full-set run's per-item seeds
         for c in configs:
-            protect, mods = CONFIGS[c]
-            frac = set_act_fp_modules(model, mods)
+            rules = CONFIGS[c]
             outdir = os.path.join(str(GEN_DIR), args.out_subdir, c, setname)
             dt = gen_config(model, tok, dev, items, eff_base, outdir,
-                            args.nfe, args.cfg_strength, args.guidance, protect)
-            print(f"[gen] {setname}/{c}: protect-steps {sorted(protect) or '[]'} "
-                  f"mods-fp {list(mods) or '[]'} (act-fp param frac {frac:.2f}) "
+                            args.nfe, args.cfg_strength, args.guidance, rules)
+            print(f"[gen] {setname}/{c}: rules {rules or '[]'} "
+                  f"(act-fp param frac {budget_frac(rules, counts):.3f}) "
                   f"-> {len(items)} items in {dt:.0f}s -> {outdir}", flush=True)
-    set_act_fp_modules(model, ())   # reset module gates
+    fq._ACT_QUANT = True
     h.remove()
     print("STEP-AXIS GEN DONE")
 
