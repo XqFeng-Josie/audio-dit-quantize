@@ -68,7 +68,8 @@ def _move(obj, dev):
 
 # ── capture block-0 input + shared conditioning across calib generations ──────
 @torch.no_grad()
-def capture_block_inputs(model, tok, dev, calib_items, max_seqs, per_item_keep, nfe=16):
+def capture_block_inputs(model, tok, dev, calib_items, max_seqs, per_item_keep, nfe=16,
+                         snap_place="spread"):
     block0 = model.transformer.blocks[0]
     cur = []  # current item's (x_cpu, cond_kwargs_cpu, prompt_dur) captures
     state = {"pd": 0}  # prompt latent length (prompt/generation-region boundary) of the current item
@@ -96,10 +97,17 @@ def capture_block_inputs(model, tok, dev, calib_items, max_seqs, per_item_keep, 
                 h.remove()
             if not cur:
                 continue
-            # strided subset across this item's ODE trajectory (timestep spread)
+            # snapshot subset of this item's ODE trajectory. "spread" (canonical) = endpoint-inclusive
+            # stride; note that at per_item_keep=2 this means ONLY the first+last step — the middle
+            # steps are never seen by calibration. "early"/"late" = the first/last k steps (L2 placement).
             n = len(cur)
             k = min(per_item_keep, n)
-            idx = [round(i * (n - 1) / max(1, k - 1)) for i in range(k)] if k > 1 else [0]
+            if snap_place == "early":
+                idx = list(range(k))
+            elif snap_place == "late":
+                idx = list(range(n - k, n))
+            else:  # spread
+                idx = [round(i * (n - 1) / max(1, k - 1)) for i in range(k)] if k > 1 else [0]
             for j in sorted(set(idx)):
                 store.append(cur[j])
             if len(store) >= max_seqs:
@@ -277,6 +285,18 @@ def main():
     ap.add_argument("--region_prompt_w", type=float, default=1.0,
                     help="per-token weight for the PROMPT region ([:prompt_dur]). >1 up-weights the voice "
                          "conditioning (targets SIM/timbre). 1.0 = off.")
+    ap.add_argument("--snap_place", default="spread", choices=["spread", "early", "late"],
+                    help="which ODE steps the per-item activation snapshots come from. spread (canonical) "
+                         "= endpoint-inclusive stride (at per_item_keep=2: first+last step ONLY); "
+                         "early/late = the first/last per_item_keep steps (L2 placement arms).")
+    ap.add_argument("--w_bits", type=int, default=4,
+                    help="weight bit-width for all target linears. 16 = leave weights full-precision "
+                         "(transform still folded; LWC disabled) -> the W16A4 attribution corner: "
+                         "quantize ONLY activations.")
+    ap.add_argument("--w8_blocks", default="",
+                    help="comma list of transformer block indices whose linears calibrate with INT8 "
+                         "weights instead of --w_bits (W1 depth-aligned weight mixed precision), "
+                         "e.g. '8,19,20,21,22,23'. Empty = off.")
     ap.add_argument("--a_bits", type=int, default=4)
     ap.add_argument("--a_asym", action="store_true",
                     help="legacy per-token ASYMMETRIC act quant ([0,15]). Default is now SYMMETRIC "
@@ -335,12 +355,29 @@ def main():
         calib = load_items(calib_lst)
         print(f"[pb] calib = {len(calib)} items from {calib_lst}")
         print(f"[pb] capturing block-0 activations on {len(calib)} prompts ...")
-        store = capture_block_inputs(model, tok, dev, calib, args.max_seqs, args.per_item_keep)
-        print(f"[pb] captured {len(store)} sequences")
+        store = capture_block_inputs(model, tok, dev, calib, args.max_seqs, args.per_item_keep,
+                                     snap_place=args.snap_place)
+        print(f"[pb] captured {len(store)} sequences (snap_place={args.snap_place})")
         if args.a_sym:
             print("[pb] note: --a_sym is deprecated (symmetric is now the default)")
-        fq.wrap_dit(model, w_bits=4, a_bits=args.a_bits, use_trans=True, lwc=True,
+        # w_bits=16 -> weights stay fp (WeightQuantizer no-ops at 16 bits); LWC off so the clip
+        # doesn't lossily modify unquantized weights. Transforms/LAC still train (they serve A4).
+        fq.wrap_dit(model, w_bits=args.w_bits, a_bits=args.a_bits, use_trans=True,
+                    lwc=(args.w_bits < 16),
                     a_sym=not args.a_asym, lac=not args.no_lac, add_diag=not args.no_diag)
+        if args.w8_blocks.strip():
+            w8 = sorted({int(t) for t in args.w8_blocks.split(",") if t.strip()})
+            nb = len(model.transformer.blocks)
+            bad = [i for i in w8 if not (0 <= i < nb)]
+            if bad:
+                raise SystemExit(f"--w8_blocks indices out of range (model has {nb} blocks): {bad}")
+            n_up = 0
+            for i in w8:
+                for w in _block_wrappers(model.transformer.blocks[i]):
+                    w.wq.configure(8, perchannel=True, sym=True, mse=False)
+                    n_up += 1
+            print(f"[pb] W1 mixed precision: {n_up} linears in blocks {w8} calibrate at INT8 weights "
+                  f"(rest {args.w_bits}-bit)")
         calibrate_perblock(model, store, dev, steps=args.steps, mb=args.mb,
                            lr=args.lr, clip_lr=args.clip_lr, loss_type=args.loss,
                            region_gen_w=args.region_gen_w, region_prompt_w=args.region_prompt_w,
@@ -350,6 +387,8 @@ def main():
                            stats_meta={"calib_lst": str(calib_lst), "calib_seed": args.calib_seed,
                                        "steps": args.steps, "mb": args.mb,
                                        "max_seqs": args.max_seqs, "per_item_keep": args.per_item_keep,
+                                       "snap_place": args.snap_place, "w_bits": args.w_bits,
+                                       "w8_blocks": args.w8_blocks,
                                        "loss": args.loss, "model_dir": args.model_dir,
                                        "n_calib_items": len(calib), "n_seqs": len(store)})
         if args.save_model:

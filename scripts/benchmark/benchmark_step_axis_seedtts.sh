@@ -67,10 +67,10 @@ run_model() {
   echo "[step-axis/$which] generating {$CONFIGS} x {$SETS} from the ONE fixed model (base=$BASE, limit=$LIMIT) ..."
   run_gen_parallel gen_cb "$SETS" "$LIMIT"
 
-  local c s A B
+  local c s A B eval_metrics="${EVAL_METRICS:-wer cer mos sim}"
   for c in $CONFIGS; do
-    echo "[step-axis/$which] eval $c (wer cer sim mos) ..."
-    bash "$ROOT_DIR/scripts/evaluate_seedtts_metrics.sh" "$SEED_GEN_DIR/$GENSUB/$c" "step_${c}${TAG}" "$SETS" "wer cer mos sim"
+    echo "[step-axis/$which] eval $c ($eval_metrics) ..."
+    bash "$ROOT_DIR/scripts/evaluate_seedtts_metrics.sh" "$SEED_GEN_DIR/$GENSUB/$c" "step_${c}${TAG}" "$SETS" "$eval_metrics"
   done
 
   # Baseline "full" = the W4A4 best-config, owned by benchmark_flatquant_best (same canonical bc_*.pt +
