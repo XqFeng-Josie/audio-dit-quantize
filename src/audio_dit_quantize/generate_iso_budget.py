@@ -1,15 +1,24 @@
-"""Iso-budget activation-bit reallocation on the FIXED best-config W4A4 model (§2.2 fairness arm).
+"""Iso-budget activation-bit reallocation on the FIXED best-config W4A4 model (§3.2 fairness arm).
 
-§2.2's protections ADD activation budget on top of W4A4 (late = 33% fp, ffnfp = 50% fp, ...).
+§3.2's protections ADD activation budget on top of W4A4 (late = 33% fp, ffnfp = 50% fp, ...).
 This experiment holds the TOTAL param-weighted average activation bit-width at EXACTLY 4.0 and
 only REALLOCATES bits -- the true "precision allocation at equal cost" test:
 
   step axis   : iso_late  = late 5 steps @A6, other 10 steps @A3   (5*6+10*3)/15 = 4.0
                 iso_early = early 5 steps @A6 (mirror control)                  = 4.0
-  module axis : iso_ffn   = FFN @A5, attn @A3    0.5*5 + 0.5*3                 = 4.0
-                iso_attn  = FFN @A3, attn @A5 (inverse control)                = 4.0
+  module axis : iso_ffn   = FFN @A5, attn @A3   (1B exactly 4.0; 3.5B 3.9474, see below)
+                iso_attn  = FFN @A3, attn @A5   (1B exactly 4.0; 3.5B 4.0526)
   baseline    : the existing step-axis `full` run (uniform A4) -- zero new generation.
   identity    : uniform4 (all A4) must reproduce `full` bit-exact; smoke-check only.
+
+MODULE-AXIS CONTRACT (pair-symmetric, decided 2026-07-23): the FFN param fraction is exactly 1/2
+on 1B (ffn ratio 4.0) but 9/19 on 3.5B (ffn ratio 3.6: per block 2*3.6d^2 ffn vs 8d^2 attn), and
+9a+10b=76 has NO integer two-level solution besides a=b=4 -- an exact per-arm 4.0 module split is
+impossible on 3.5B (per-linear/per-block compensation or step-mixed schedules would inject
+arbitrary subsets/step structure; rejected). Contract: PAIR MEAN exactly 4.0, per-arm deviation
+<= 1/19 bit (3.5B: iso_ffn 3.9474 / iso_attn 4.0526). The predicted winner iso_ffn is the
+LOWER-budget arm, so an iso_ffn win is conservative; an iso_attn win is budget-confounded.
+Step-axis arms are composition-independent (exactly 4.0 at every scale).
 
 Protocol identical to generate_step_axis: same fixed calibrated model, per-item seed =
 base + offset + idx, same sets/sharding, wav validity guard. Weights stay INT4 everywhere;
@@ -17,7 +26,7 @@ only ActivationQuantizer bit-widths are re-stamped per ODE step. Per-token dynam
 means changing bits needs no recalibration (scales are computed per forward; the learned LAC
 clip factors are scalar amax/amin multipliers, bits-independent, shared by all arms).
 
-DOCUMENTED HANDICAP (pre-registered, docs/results-consolidated.md §2.3): transforms/clips were
+DOCUMENTED HANDICAP (pre-registered, docs/results-consolidated.md §4): transforms/clips were
 calibrated at uniform A4, so the non-uniform arms run off their calibrated operating point while
 the uniform-A4 baseline runs on it. The two arms of each axis are symmetric to each other (fair
 pair); arm-vs-baseline carries the handicap -- an arm that still beats `full` is a strong result,
@@ -55,6 +64,8 @@ CONFIGS = {
     "iso_attn":  lambda step, tag: 3 if tag == "ffn" else 5,
     "uniform4":  lambda step, tag: 4,   # identity control: must match step-axis `full` bit-exact
 }
+MIRROR = {"iso_late": "iso_early", "iso_early": "iso_late",
+          "iso_ffn": "iso_attn", "iso_attn": "iso_ffn", "uniform4": "uniform4"}
 
 
 def avg_bits(policy, counts):
@@ -161,9 +172,12 @@ def main():
         raise SystemExit(f"wrapped linears without module tag (policy would be undefined): {untagged}")
     for c in configs:
         b = avg_bits(CONFIGS[c], counts)
-        print(f"[iso] {c}: param-weighted avg activation bits = {b:.4f}", flush=True)
-        if abs(b - 4.0) > 0.01:
-            raise SystemExit(f"config {c} breaks the iso-budget contract (avg bits {b:.4f} != 4.0)")
+        pair = (b + avg_bits(CONFIGS[MIRROR[c]], counts)) / 2
+        print(f"[iso] {c}: param-weighted avg activation bits = {b:.4f} "
+              f"(mirror {MIRROR[c]}: pair mean = {pair:.4f})", flush=True)
+        if abs(pair - 4.0) > 1e-3 or abs(b - 4.0) > 1 / 19 + 1e-6:
+            raise SystemExit(f"config {c} breaks the pair-symmetric iso contract "
+                             f"(avg bits {b:.4f}, pair mean {pair:.4f})")
 
     h = model.transformer.register_forward_pre_hook(_hook)
     try:

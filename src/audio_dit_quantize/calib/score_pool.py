@@ -1,7 +1,7 @@
 """E1 calibration-pool scoring pass: per-sample intermediate signals on the FP model.
 
 Tests whether the literature's per-sample calibration-selection signals predict
-calibration-set quality in TTS (docs/results-consolidated.md §4.3, paper §4):
+calibration-set quality in TTS (docs/results-consolidated.md §1.5, paper §4):
 
   S1  trajectory motion  (S2Q-VDiT C_diff, NeurIPS'25):   ||x_{t+1}-x_t||^2 / ||x_t||^2
   S2  activation energy  (S2Q-VDiT C_quant / QuantVGGT NFDS stats, ICLR'26):

@@ -1,4 +1,4 @@
-"""E1 offline analysis: set-level scores vs known dual-scale set rankings (pre-registered §4.5)."""
+"""E1 offline analysis: set-level scores vs known dual-scale set rankings (pre-registered §1.6)."""
 import csv, itertools, os
 import numpy as np
 
