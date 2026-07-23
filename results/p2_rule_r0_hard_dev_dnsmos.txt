@@ -1,0 +1,3 @@
+DNSMOS_ovrl: 3.360
+DNSMOS_p808: 3.849
+(n=100)

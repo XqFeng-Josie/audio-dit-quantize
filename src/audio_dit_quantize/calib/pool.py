@@ -713,6 +713,79 @@ def sample(args):
     print(f"[sample] {args.n} items (seed {args.seed}) {pool.name} -> {out}")
 
 
+# ── multi-factor stratified construction (controlled coverage/composition ablation) ──
+_QUAL_FEATS = {  # feature -> sign (+1: larger value = higher "coverage/quality")
+    "n_uniq_syll": +1, "uniq_char_ratio": +1, "max_syll_repeat": -1,
+    "n_chars_target": +1, "prompt_rms_db": +1,
+}
+
+
+def strat(args):
+    """Construct ONE stratified calibration set by multi-factor 'quality' criteria, randomised
+    within constraints (draw multiple --seed to get a DISTRIBUTION per profile).
+
+      profile=good : high syllable/char coverage, low repetition, long targets, louder prompts,
+                     DISTINCT speakers.
+      profile=poor : the opposite (low coverage / repetitive / short / quiet).
+    Composition (--n_en / --n_hard, rest = zh_normal) is a SEPARATE knob: keep it EQUAL across the
+    two profiles for a CLEAN coverage-only contrast, or vary it for a full-strategy contrast (the
+    latter confounds the scale-specific language effect of §4.2 — interpret accordingly).
+
+    HONEST USE: a controlled ablation, NOT a pre-labelled winner. Draw K seeds per profile, run
+    BOTH model scales, compare the good-distribution vs poor-distribution under the paired
+    protocol, and report the outcome as-is (including null / scale-dependent results).
+    """
+    import csv as _csv
+    pool = Path(args.pool)
+    meta = {r["uid"]: r for r in _csv.DictReader(open(pool.parent / (pool.stem + "_meta.csv"), encoding="utf-8"))}
+    lines = [l.rstrip("\n") for l in open(pool, encoding="utf-8") if l.strip()]
+    order = {l.split("|")[0]: i for i, l in enumerate(lines)}
+    by_uid = {l.split("|")[0]: l for l in lines}
+    rng = np.random.default_rng(args.seed)
+
+    def fval(u, k):
+        try: return float(meta[u].get(k, "") or 0.0)
+        except (TypeError, ValueError): return 0.0
+    z = {}
+    for k in _QUAL_FEATS:
+        col = np.array([fval(u, k) for u in by_uid])
+        mu, sd = col.mean(), (col.std() or 1.0)
+        z[k] = {u: (fval(u, k) - mu) / sd for u in by_uid}
+    sgn = 1.0 if args.profile == "good" else -1.0
+    score = {u: sgn * sum(_QUAL_FEATS[k] * z[k][u] for k in _QUAL_FEATS) + rng.normal(0.0, args.jitter)
+             for u in by_uid}
+
+    def pick(prefix, k, used_spk):
+        cands = sorted((u for u in by_uid if u.startswith(prefix)), key=lambda u: -score[u])
+        chosen = []
+        if args.profile == "good":                       # distinct speakers first
+            for u in cands:
+                if len(chosen) >= k: break
+                if meta[u]["spk"] not in used_spk:
+                    chosen.append(u); used_spk.add(meta[u]["spk"])
+        for u in cands:                                   # fill (poor: this is the whole pass)
+            if len(chosen) >= k: break
+            if u not in chosen: chosen.append(u)
+        return chosen[:k]
+
+    used = set()
+    sel = (pick("enn_", args.n_en, used) + pick("zhh_", args.n_hard, used)
+           + pick("zhn_", args.n - args.n_en - args.n_hard, used))
+    sel = sorted(sel, key=order.get)
+    out = Path(args.out); out.parent.mkdir(parents=True, exist_ok=True)
+    with open(out, "w", encoding="utf-8") as f:
+        for u in sel:
+            p = by_uid[u].split("|")
+            p[2] = os.path.relpath((pool.parent / p[2]).resolve(), out.parent.resolve())
+            f.write("|".join(p) + "\n")
+    comp = defaultdict(int)
+    for u in sel: comp[u.split("_")[0]] += 1
+    fm = {k: float(np.mean([fval(u, k) for u in sel])) for k in _QUAL_FEATS}
+    print(f"[strat:{args.profile}] {out.name}: {dict(comp)} | "
+          f"{len({meta[u]['spk'] for u in sel})}/{len(sel)} spk | "
+          + " ".join(f"{k}={fm[k]:.2f}" for k in _QUAL_FEATS))
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -761,6 +834,15 @@ def main():
     c.add_argument("--swap", type=int, required=True, help="how many base items are replaced by factor items in set B")
     c.add_argument("--seed", type=int, default=1000)
     c.add_argument("--out_dir", default=None, help="default: <pool_dir>/sets")
+    t = sub.add_parser("strat", help="multi-factor stratified set (good/poor profile; controlled ablation)")
+    t.add_argument("--pool", required=True)
+    t.add_argument("--profile", required=True, choices=["good", "poor"])
+    t.add_argument("--n", type=int, default=32)
+    t.add_argument("--n_en", type=int, default=11, help="English items (eval-proportional default 11)")
+    t.add_argument("--n_hard", type=int, default=5, help="hardlike items (rest = zh_normal)")
+    t.add_argument("--jitter", type=float, default=0.5, help="score noise in z-units for multi-seed draw variability")
+    t.add_argument("--seed", type=int, required=True)
+    t.add_argument("--out", required=True)
     args = ap.parse_args()
     if args.cmd == "build":
         build(args)
@@ -768,6 +850,8 @@ def main():
         sample(args)
     elif args.cmd == "select":
         select(args)
+    elif args.cmd == "strat":
+        strat(args)
     elif args.cmd == "probe":
         probe(args)
     elif args.cmd == "spkctr":
