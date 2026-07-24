@@ -1,0 +1,10 @@
+\section{Background}
+ 
+\paragraph{Post-training quantization.}
+We quantize both weights and activations to low bit-width (our main setting is W4A4). Activation quantization uses dynamic, per-token min--max scaling computed at inference time, the common strong default for transformer activations. A calibration set of a few dozen to a few hundred samples is used to fit any learned quantization parameters (e.g., rotation/affine transforms, clipping ranges) by matching the full-precision (FP) and quantized outputs, typically under a mean-squared-error (MSE) objective.
+ 
+\paragraph{Rotation-based PTQ.}
+Outlier-dominated channels are the main obstacle to low-bit activation quantization. Rotation methods apply a transform $R$ such that $R x R^{-1}$ has a flatter, more quantizable distribution. QuaRot fixes $R$ to a random Hadamard matrix; FlatQuant learns $R$ by continuous optimization on calibration data, which yields the best low-bit accuracy in our study. Because the transform is approximately output-preserving, the method is largely task-agnostic---its quality depends mainly on how ``flat'' the resulting distribution is.
+ 
+\paragraph{The target model.}
+We study a latent diffusion-transformer TTS model that (a) encodes the waveform into a continuous VAE latent and (b) generates that latent with a DiT conditioned on text (and a reference utterance for voice cloning). We evaluate two public scales, 1B and 3.5B parameters. Sampling uses a 16-node flow-matching ODE trajectory, i.e., $S{=}15$ Euler steps, with classifier-free guidance (an effective $15{\times}2$ forward passes); the timestep axis throughout this paper indexes these 15 network evaluations. The two headline tasks are TTS and voice cloning; the primary quality axes are intelligibility (text--speech alignment) and speaker-timbre similarity.

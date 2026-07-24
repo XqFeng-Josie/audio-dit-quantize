@@ -1,0 +1,88 @@
+\section{Method}
+Our design principle is that, for a mature rotation-based PTQ backbone, the quantization \emph{architecture} is hard to improve further; the remaining leverage lies in the two inputs the pipeline still leaves open: \emph{what the quantizer is calibrated on}, and \emph{where activation precision is spent}. We keep FlatQuant untouched and add one component at each lever: task-mirrored calibration (Sec.~\ref{sec:tmc}) and structure-aligned precision allocation (Sec.~\ref{sec:lateffn}). We call the resulting recipe \emph{TTS-Q}. Both components follow the same principle, \emph{perception-guided} in the literal sense: a controlled measurement of where the perceptual damage lives comes first, and the smallest intervention that exploits it follows. Figure~\ref{fig:method} gives an overview.
+
+\input{sections/fig_method}
+
+\subsection{Preliminaries}
+\label{sec:prelim}
+
+\paragraph{TTS diffusion transformer.}
+The generator is a latent DiT $v_\theta$ conditioned on text $c$ and a reference utterance $p$ that supplies the target speaker's timbre. Starting from noise $z_{0}$, a flow-matching sampler \citep{lipman2023flow} integrates
+\begin{equation}
+z_{k+1} \;=\; z_{k} + (\tau_{k+1}-\tau_{k})\, v_\theta\!\left(z_{k},\tau_{k},c,p\right),
+\label{eq:ode}
+\end{equation}
+for $k=0,\dots,S{-}1$, with $S{=}15$ Euler steps (16 time nodes) and classifier-free guidance \citep{ho2022cfg}. Each DiT block contains self-attention, cross-attention to the text, and an FFN; a VAE decoder maps the final latent to audio. The two task axes are \emph{intelligibility} (does the audio say $c$?) and \emph{speaker similarity} (does it sound like $p$?). The two are separable in speech in a way that has no analogue in image or video quality.
+
+\paragraph{Post-training quantization.}
+A $b$-bit symmetric quantizer maps a tensor $x$ to
+\begin{equation}
+Q_b(x) \;=\; \Delta\cdot\mathrm{clamp}\!\left(\mathrm{round}\!\big(\tfrac{x}{\Delta}\big),\, -2^{b-1},\, 2^{b-1}{-}1\right),
+\label{eq:quant}
+\end{equation}
+with $\Delta=\max|x|/(2^{b-1}{-}1)$. We quantize all linear layers inside DiT blocks; W$w$A$a$ denotes $w$-bit weights and $a$-bit activations, and our main setting is W4A4. FlatQuant \citep{sun2025flatquant} learns per-layer affine transforms $P_\ell$ that flatten activation distributions, fitted per block on a calibration set $\mathcal{D}$ by output reconstruction,
+\begin{equation}
+\min_{\{P_\ell\}} \;\; \mathbb{E}_{x\sim\mathcal{D}}\, \big\| B^{q}_{\ell}(h_\ell(x)) - B^{f}_{\ell}(h_\ell(x)) \big\|_F^2 ,
+\label{eq:calib}
+\end{equation}
+where $B^{f}_\ell$ and $B^{q}_\ell$ are the FP and quantized block $\ell$ and $h_\ell(x)$ its input. Because storing whole sampler trajectories is infeasible, $h_\ell$ is collected from per-item \emph{snapshots} of the trajectory (by default the first and the last of the $S$ steps), and activation clipping ranges are fitted on the same snapshots. Two knobs are therefore left open by the backbone: which items enter $\mathcal{D}$, and which steps the snapshots come from.
+
+\subsection{Task-Mirrored Calibration}
+\label{sec:tmc}
+
+What should $\mathcal{D}$ contain for a TTS DiT? Salient-data selection is an active topic in visual-DiT PTQ: S$^2$Q-VDiT scores each candidate by \emph{diffusion salience} $C_\text{diff}=\lVert x_t-x_{t-1}\rVert^{2}/\lVert x_t\rVert^{2}$ (the normalized step-to-step latent change) and \emph{quantization salience} $C_\text{quant}=\lVert x_t^{\top}x_t\rVert_{2}$ (an input-Hessian sensitivity proxy) \citep{feng2025s2qvdit}, and QuantVGGT filters candidates by deep-layer activation statistics \citep{feng2026quantvggt}. We re-implemented both salience families and scored our entire candidate pool with them, at both scales. The result motivates a different design:
+
+\noindent\textbf{Observation 1.} \emph{Transplanted salience scores lack discriminative power at the granularity where calibration data is chosen; their only clear prescription, which timesteps matter, is inverted for TTS; yet set composition itself causally matters.} (i)~A candidate set is scored by the mean of its items, and means concentrate: for items drawn independently from the pool,
+\begin{equation}
+\mathrm{CV}\big[\bar{s}(\mathcal{D})\big] \;=\; \mathrm{CV}[s]\big/\sqrt{|\mathcal{D}|}\,,
+\label{eq:cv}
+\end{equation}
+a $5.7\times$ collapse at $|\mathcal{D}|{=}32$. The collapse is exactly what we measure: across random 32-item subsets of our pool, every mean-aggregated salience score has a CV of 0.3--1.6\%, versus 2--10\% per item, so equally sized candidate sets receive near-identical scores, whatever the score. (ii)~The timestep profile of $C_\text{diff}$ places its mass on \emph{early} steps ($3.2\times$ the late-step mass, identical at both scales), whereas TTS task sensitivity concentrates on late steps (Sec.~\ref{sec:lateffn}); Rule~3 tests this prescription causally on its own axis. (iii)~A composition-matched set of easy items nevertheless damages \hard{} CER significantly, so what enters $\mathcal{D}$ does matter, even though the scores cannot see it.
+
+Observation~1 rules out selection by scoring: set-level averages carry no signal, and the one remaining use of a per-item score, constructing extreme sets, must then be validated on the task itself. Task-mirrored calibration (TMC) therefore replaces \emph{scoring} with \emph{construction}, via three rules: mirror the task's form (Rule~1), enforce a validated difficulty floor (Rule~2), and place calibration snapshots where the task is sensitive (Rule~3).
+
+\paragraph{Rule 1: mirror the task's form, not its content.}
+Calibration should expose the quantizer to the activation statistics it will meet at deployment, and the closest one can safely get to those statistics is to match the benchmark's surface form while sharing none of its content. We therefore build a candidate pool whose \emph{marginal form} matches the target benchmark: prompt-duration and text-length acceptance windows set from benchmark quantiles; language composition mirrored (\zh{} regular, \hard{}-style, \en{}); hard-style texts produced by a deterministic confusable-syllable/repetition/concatenation generator; prompts and targets cross-paired so no target text comes from the prompt's own utterance or speaker. Speaker-level disjointness and five automated contamination audits are enforced (pool statistics in Appendix). Calibration sets are then drawn uniformly from this pool.
+
+\paragraph{Rule 2: a difficulty floor.}
+Rule 1 fixes what the pool looks like; within the pool, items still differ in how much they exercise the calibration objective. We score each candidate by its initial per-block reconstruction loss under quantization,
+\begin{equation}
+\ell_{\text{init}}(x) \;=\; \tfrac{1}{L}\sum_{\ell=1}^{L} \big\| B^{q}_{\ell}(h_\ell(x)) - B^{f}_{\ell}(h_\ell(x)) \big\|_F^2\,,
+\label{eq:lossinit}
+\end{equation}
+evaluated before any transform is trained. We do not rank candidate sets by their mean score; instead we construct extreme sets from the top and the bottom of the $\ell_{\text{init}}$ ranking and test them against a random anchor set of identical composition. The bottom set, built from the easiest items, significantly damages \hard{} CER: $+0.63$ CER points against the anchor and $+0.56$ against full precision (1B; intervals and the 3.5B replication in Sec.~\ref{sec:dataexp}). The top set is the best of the three, but its margin over the anchor is not significant. This asymmetry yields the rule: TMC does not need to chase difficult items; it needs a floor that excludes the easy tail. The intuition is simple: items the quantized model already reconstructs well leave little signal for fitting the transforms and clipping ranges of Eq.~\ref{eq:calib}, so they spend calibration capacity without buying accuracy.
+
+\paragraph{Rule 3: late-inclusive snapshots.}
+The snapshots that feed activation clipping must include \emph{late} trajectory steps. Calibrating from early-step snapshots alone significantly degrades similarity (\zh{} $-0.0025$, \en{} $-0.0055$; 1B), late-only placement is neutral, and the late$-$early contrast is significant on both axes; adding more snapshots beyond the two endpoints saturates. This validates the first+last default and explains why it works: the late endpoint carries the timbre value, and the early endpoint guards intelligibility (late-only placement shows a mild \zh{} CER pressure). It is also the data-side face of the temporal structure exploited next.
+
+\subsection{Structure-Aligned Precision Allocation}
+\label{sec:lateffn}
+
+Rule~3 already hinted that the task's sensitivity has a temporal shape. The second lever turns that shape, and its module counterpart, into a budget decision: we first attribute the W4A4 damage causally, then convert the structure it reveals into a precision schedule.
+
+\noindent\textbf{Observation 2.} \emph{The timbre cost is dual-source and its activation share concentrates in late-step FFNs.} Factoring W4A4 into W16A4 (activations only) and W4A16 (weights only) on strictly paired syntheses shows that each factor alone significantly reduces SIM on \zh{} and \en{} at both scales, and that the two shares are approximately additive (1B \en{}: $-0.0025$ and $-0.0047$ vs.\ $-0.0078$ combined), while \emph{no} text axis has a significant single-factor cost at either scale. Restoring one activation class at a time on the frozen W4A4 model localizes the recoverable share: FFN activations carry it (protecting FFN beats protecting self-attention, five of six set$\times$scale combinations), and \emph{late} steps carry it (protecting the last five steps helps on five of six; protecting the first five helps nowhere and significantly hurts on 1B \hard{}), reversing the protect-early rule that visual diffusion PTQ has converged on \citep{li2023qdiffusion,shang2023ptq4dm,zhao2025viditq}.
+
+Of the two sources, only the activation share is actionable at inference time. Weights are quantized once, offline; buying their share back means mixed weight precision, and the standard reconstruction-guided form of that route fails on this task (Sec.~\ref{sec:negative}). Activation precision, by contrast, can be switched per module and per step on the frozen model. The schedule follows.
+
+\paragraph{The \cfg{late-ffn} schedule.}
+An activation-precision \emph{schedule} assigns a bit-width $a(m,k)$ to every module class $m$ at sampler step $k$, at the parameter-weighted average cost
+\begin{equation}
+\mathcal{B}(a) \;=\; \frac{1}{S}\sum_{k=0}^{S-1}\frac{\sum_{m} p_m\, a(m,k)}{\sum_{m} p_m}\,,
+\label{eq:budget}
+\end{equation}
+where $p_m$ is the parameter count of class $m$; uniform W4A4 is the schedule $a\equiv 4$. We keep activations in FP only where the structure says the timbre lives, FFN modules during the last $K$ steps:
+\begin{equation}
+a(m,k) \;=\;
+\begin{cases}
+16 & m\in\text{FFN},\; k \ge S{-}K,\\[2pt]
+4 & \text{otherwise},
+\end{cases}
+\label{eq:schedule}
+\end{equation}
+with $K{=}5$, i.e., about one sixth of parameter-weighted activation traffic ($\approx$17\% at 1B, $\approx$16\% at 3.5B); weights stay INT4 everywhere. The schedule is applied at inference to the frozen quantized model: no recalibration, no retraining, and the switch itself is free. Because raising $\mathcal{B}$ trivially helps, we also verify the \emph{placement} claim at fixed cost, with the equal-budget arm
+\begin{equation}
+a_{\text{late}}(\cdot,k)=
+\begin{cases} 6 & k\ge S-5,\\ 3 & \text{otherwise},\end{cases}
+\label{eq:iso}
+\end{equation}
+against its mirror $a_{\text{early}}$ (A6 on the \emph{first} five steps instead), both with $\mathcal{B}=4.0$ exactly, and an analogous A5/A3 pair across modules. If placement carries the value, $a_{\text{late}}$ must win at equal cost. Section~\ref{sec:isoexp} confirms that it does, and that $a_{\text{early}}$ is \emph{worse than uniform}: misplaced precision is not merely wasted, it is harmful. The certificate also has a constructive corollary: at 3.5B the budget-neutral arm already beats uniform A4 on \zh{} \emph{despite} its transforms being calibrated at A4, so budget-neutral reallocation is a viable deployment mode of Eq.~\ref{eq:budget} once each schedule is calibrated at its own bit-widths; we leave that step to future work, and \cfg{late-ffn} remains our recommended configuration.

@@ -62,6 +62,19 @@ def qgptq_model_path(model_dir: str) -> Path:
     return MODELS_DIR / f"qgptq_{tag}_model.pt"
 
 
+def gptq_model_path(model_dir: str) -> Path:
+    """Canonical calibrated plain-GPTQ (no rotation) model path — the ladder ablation between
+    RTN and QuaRot-GPTQ. Same calibrate-once/reuse pattern as qgptq_model_path."""
+    tag = "3p5b" if ("3.5" in model_dir or "3p5" in model_dir) else "1b"
+    return MODELS_DIR / f"gptq_{tag}_model.pt"
+
+
+def sq_model_path(model_dir: str) -> Path:
+    """Canonical calibrated SmoothQuant model path (scale-migration baseline)."""
+    tag = "3p5b" if ("3.5" in model_dir or "3p5" in model_dir) else "1b"
+    return MODELS_DIR / f"sq_{tag}_model.pt"
+
+
 def svd_model_path(model_dir: str) -> Path:
     """Canonical calibrated SVDQuant model path (1B -> svd_1b_model.pt, 3.5B -> svd_3p5b_model.pt).
     Calibrate once (single-GPU) + save, then load for sharded multi-GPU generation — the same

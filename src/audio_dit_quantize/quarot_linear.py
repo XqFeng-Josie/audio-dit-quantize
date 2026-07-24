@@ -67,6 +67,22 @@ def _had12():
     ], dtype=torch.float64)
 
 
+def _had20():
+    """Paley-I Hadamard of order 20 (q=19 ≡ 3 mod 4): H = I + C, C the skew conference
+    matrix built from the quadratic-residue (Jacobsthal) matrix. Self-checked H Hᵀ = 20·I."""
+    q = 19
+    residues = {(i * i) % q for i in range(1, q)}
+    chi = lambda x: 0.0 if x % q == 0 else (1.0 if x % q in residues else -1.0)
+    Q = torch.tensor([[chi(i - j) for j in range(q)] for i in range(q)], dtype=torch.float64)
+    C = torch.zeros((q + 1, q + 1), dtype=torch.float64)
+    C[0, 1:] = 1.0
+    C[1:, 0] = -1.0
+    C[1:, 1:] = Q
+    H = torch.eye(q + 1, dtype=torch.float64) + C
+    assert torch.equal(H @ H.T, 20.0 * torch.eye(20, dtype=torch.float64)), "had20 self-check failed"
+    return H
+
+
 def _sylvester(m):
     """Dense 2^k Hadamard of size m (m a power of 2): H Hᵀ = m·I."""
     H = torch.ones((1, 1), dtype=torch.float64)
@@ -76,14 +92,20 @@ def _sylvester(m):
 
 
 def _unnormalized_hadamard(n):
-    """±1 Hadamard of order n (H Hᵀ = n·I), via had12 ⊗ Sylvester or pure Sylvester."""
+    """±1 Hadamard of order n (H Hᵀ = n·I): base ⊗ Sylvester with base ∈ {had12, had20,
+    had12⊗had12} or pure Sylvester. Kronecker products of Hadamards are Hadamard, so every
+    branch satisfies H Hᵀ = n·I exactly."""
     if n % 12 == 0 and _is_pow2(n // 12):
         return torch.kron(_had12(), _sylvester(n // 12))
+    if n % 20 == 0 and _is_pow2(n // 20):
+        return torch.kron(_had20(), _sylvester(n // 20))            # 3.5B dit_dim 2560 = 20·2^7
+    if n % 144 == 0 and _is_pow2(n // 144):
+        return torch.kron(torch.kron(_had12(), _had12()), _sylvester(n // 144))  # 3.5B ffn mid 9216 = 144·2^6
     if _is_pow2(n):
         return _sylvester(n)
     raise ValueError(
         f"no Hadamard factorization for in_features={n} "
-        f"(need n = 12·2^m or 2^m); extend with had20/had28 if a new dim appears")
+        f"(need n = 12·2^m, 20·2^m, 144·2^m or 2^m); extend with had28/had36 if a new dim appears")
 
 
 # rotation matrices are shared across all linears with the same in_features (one per dim)
@@ -202,18 +224,25 @@ class _GPTQ:
 
 
 class QuaRotLinear(nn.Module):
-    def __init__(self, linear: nn.Linear, w_bits=4, a_bits=4, w_clip_ratio=1.0):
+    rotate = True   # class-level default: models torch.save'd BEFORE this attr existed unpickle
+                    # without __init__, so instances lacking it fall back here (= old behavior)
+
+    def __init__(self, linear: nn.Linear, w_bits=4, a_bits=4, w_clip_ratio=1.0, rotate=True):
         super().__init__()
         self.linear = linear
         self.in_features = linear.in_features
         self.w_bits, self.a_bits, self.w_clip_ratio = w_bits, a_bits, w_clip_ratio
+        self.rotate = rotate        # False = plain-GPTQ ablation: identical pipeline, R = I
         self._frozen = False
         self._collecting = False    # GPTQ Hessian-accumulation mode (calibration only)
         self._gptq = None
         self.act_quant = True       # off only while advancing calib inputs (official protocol)
 
     def _rotate(self, t):
-        """Apply the orthonormal rotation to the contraction (last) dim, in fp32."""
+        """Apply the orthonormal rotation to the contraction (last) dim, in fp32.
+        rotate=False (plain-GPTQ ladder baseline) keeps the fp32 cast but skips R."""
+        if not self.rotate:
+            return t.float()
         R = get_rotation(self.in_features, t.device)
         return t.float() @ R
 
@@ -275,12 +304,13 @@ def _target_linears(transformer):
                     yield sub, attr, child
 
 
-def wrap_dit(model, w_bits=4, a_bits=4, w_clip_ratio=1.0, freeze=True):
+def wrap_dit(model, w_bits=4, a_bits=4, w_clip_ratio=1.0, freeze=True, rotate=True):
     """Wrap target DiT linears with QuaRotLinear. freeze=True bakes RTN weights immediately
-    (training-free QuaRot-RTN); freeze=False leaves them fp for calibrate_gptq (QuaRot-GPTQ)."""
+    (training-free QuaRot-RTN); freeze=False leaves them fp for calibrate_gptq (QuaRot-GPTQ).
+    rotate=False = plain-GPTQ ladder baseline (same solver/clip/act-quant, no Hadamard)."""
     wrapped = []
     for parent, attr, lin in list(_target_linears(model.transformer)):
-        qr = QuaRotLinear(lin, w_bits, a_bits, w_clip_ratio).to(lin.weight.device)
+        qr = QuaRotLinear(lin, w_bits, a_bits, w_clip_ratio, rotate=rotate).to(lin.weight.device)
         if freeze:
             qr.freeze()
         setattr(parent, attr, qr)

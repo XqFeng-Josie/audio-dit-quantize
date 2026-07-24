@@ -1,0 +1,154 @@
+\section{Experiments}
+\label{sec:exp}
+
+The experiments follow the logic of the method. We first chart how W4A4 degrades TTS and show that the damage profile is not the one the vision literature predicts (Sec.~\ref{sec:main}). We then test each TMC rule in a controlled setting (Sec.~\ref{sec:dataexp}), establish causally where the timbre cost lives (Sec.~\ref{sec:attrexp}), and verify at strictly equal budget that the structure, not extra precision, carries the gain (Sec.~\ref{sec:isoexp}). We close with the interventions that fail, which mark the boundaries of where task structure can enter PTQ (Sec.~\ref{sec:negative}).
+
+\subsection{Settings}
+\label{sec:settings}
+
+\paragraph{Models and backbone.}
+LongCat-AudioDiT at 1B (24 blocks) and 3.5B (32 blocks) \citep{xin2026longcat}, quantized with FlatQuant at its paper-best configuration (learned affine transforms, 200 reconstruction steps per block, 32 calibration items). Every main claim is replicated at both scales.
+
+\paragraph{Benchmark and metrics.}
+Seed-TTS-eval \citep{seedttseval}: \zh{} (2{,}020 regular Mandarin items), \hard{} (400 challenging Mandarin items: tongue twisters, repetitions), \en{} (1{,}088 English items). CER/WER from ASR transcripts (Paraformer for Mandarin \citep{gao2022paraformer}, Whisper-large-v3 for English \citep{radford2023whisper}); SIM as cosine similarity between WavLM speaker embeddings \citep{chen2022wavlm} of synthesis and prompt; UTMOS/DNSMOS in Appendix (quantization leaves naturalness essentially untouched). Calibration-cycle sweeps (each set requires a full calibrate$\to$generate$\to$evaluate pass) use fixed dev splits (\zh{} 300 / \hard{} 100 / \en{} 200); single-configuration experiments use the full sets. The two regimes are never numerically compared.
+
+\paragraph{Paired protocol.}
+Every configuration synthesizes the same items with the same fixed per-item seeds; we report per-item paired differences with 95\% CIs from a paired bootstrap ($10^4$ resamples). A difference is significant (\sig) iff its CI excludes zero; all comparisons are reported.
+
+\paragraph{Baselines.}
+RTN; QuaRot$+$GPTQ \citep{ashkboos2024quarot,frantar2023gptq}; SVDQuant \citep{li2025svdquant}; FlatQuant \citep{sun2025flatquant} (our backbone); and a calibration-free dynamic W8A8 reference. All calibrated methods use the same 32-item calibration set and budget. The calibration pool (376 items, 158 speakers) is built from AISHELL-3 \citep{shi2021aishell3}, LibriTTS \citep{zen2019libritts}, and the hard-style generator of Sec.~\ref{sec:tmc}; unless otherwise noted, experiments use a fixed 32-item calibration set drawn from this pool.
+
+\subsection{Main Results}
+\label{sec:main}
+
+\begin{table*}[t]
+\centering
+\small
+\setlength{\tabcolsep}{5pt}
+\begin{tabular}{llcccccc}
+\toprule
+& Method & \zh{} CER$\downarrow$ & \hard{} CER$\downarrow$ & \en{} WER$\downarrow$ & \zh{} SIM$\uparrow$ & \hard{} SIM$\uparrow$ & \en{} SIM$\uparrow$ \\
+\midrule
+\multirow{6}{*}{1B}
+& FP                       & 1.193 & 6.888 & 2.114 & 0.8119 & 0.7901 & 0.7632 \\
+& RTN                      & 104.6 & 101.4 & 149.7 & 0.7274 & 0.6975 & 0.4852 \\
+& QuaRot$+$GPTQ            & 1.267 & 6.879 & 2.163 & 0.8068 & 0.7860 & 0.7517 \\
+& SVDQuant                 & 1.228 & \textbf{6.649} & 2.229 & 0.8062 & 0.7864 & 0.7546 \\
+& FlatQuant                & \textbf{1.191} & 6.765 & \textbf{2.155} & 0.8091 & 0.7873 & 0.7554 \\
+& \ \ $+$\cfg{late-ffn} (ours) & 1.206 & 6.743 & 2.166 & \textbf{0.8103} & \textbf{0.7884} & \textbf{0.7568} \\
+\midrule
+\multirow{6}{*}{3.5B}
+& FP                       & 1.139 & 5.973 & 1.919 & 0.8190 & 0.7983 & 0.7834 \\
+& RTN                      & 103.1 & 100.6 & 140.2 & 0.7390 & 0.7248 & 0.5299 \\
+& QuaRot$+$GPTQ            & 1.140 & 6.067 & 1.931 & 0.8166 & 0.7978 & 0.7760 \\
+& SVDQuant                 & \textbf{1.136} & 6.136 & 1.881 & 0.8177 & \textbf{0.7990} & 0.7791 \\
+& FlatQuant                & 1.249 & \textbf{5.936} & \textbf{1.813} & 0.8175 & 0.7985 & 0.7796 \\
+& \ \ $+$\cfg{late-ffn} (ours) & 1.246 & 5.946 & 1.888 & \textbf{0.8183} & 0.7989 & \textbf{0.7812} \\
+\bottomrule
+\end{tabular}
+\caption{W4A4 quantization of a TTS DiT (full test sets; CER/WER in \%). Bold: best result in each column excluding FP. All calibrated methods share the same 32-item calibration set and budget; \cfg{late-ffn}'s SIM gains over the FlatQuant backbone are significant under the paired protocol on all three sets at 1B and on \zh{}/\en{} at 3.5B.}
+\label{tab:main}
+\end{table*}
+
+Table~\ref{tab:main} shows the landscape. RTN collapses outright at both scales (CER${>}100\%$: unintelligible or empty audio); W4A4 is a real cliff for TTS, and transforms plus calibration are a precondition for usability rather than a refinement. The two gradient-free calibrated baselines restore intelligibility to FP level but pay roughly twice FlatQuant's timbre cost at 1B, landing in the same tier despite entirely different mechanisms (Hadamard rotation with GPTQ vs.\ closed-form low-rank with smoothing): the gap tracks gradient-based calibration, not any single trick. The \emph{shape} of the damage (text near FP, SIM consistently down) recurs across every calibrated substrate, so the diagnosis that follows is not a FlatQuant artifact. On the FlatQuant backbone, \cfg{late-ffn} recovers a significant fraction of the SIM cost on all three sets at 1B and on \zh{}/\en{} at 3.5B (at 3.5B the \hard{} SIM cost is already absent, leaving nothing to recover), with no significant intelligibility change vs.\ FP anywhere.
+
+\paragraph{Degradation anatomy.}
+Two facts qualify the small SIM deltas. \emph{Anisotropy}: no text axis shows a significant single-factor cost at either scale (the only significant text cell anywhere in Tables~\ref{tab:main} and~\ref{tab:attr} is the weight$\times$activation interaction on 3.5B \zh{}), whereas SIM degrades significantly on all three sets at 1B and on \zh{}/\en{} at 3.5B (Table~\ref{tab:attr}); the \hard{} SIM cost vanishes with scale. \emph{The cost predates 4 bits}: the calibration-free dynamic W8A8 reference already reduces SIM significantly while leaving all six text axes statistically untouched (Appendix), so the timbre cost is inherent to quantization rather than an artifact of calibration.
+
+\subsection{Calibration Data Study}
+\label{sec:dataexp}
+
+We validate the TMC rules in turn. Rule~1 cannot be ablated in isolation, because its pool underlies every experiment in the paper; Rules~2 and~3, by contrast, admit controlled tests.
+
+\paragraph{Difficulty floor (Rule 2).}
+Rule~2 claims that easy items waste calibration capacity. With composition locked to the anchor set, the lowest-$\ell_{\text{init}}$ set damages \hard{} CER significantly ($+0.63$ $[+0.09,+1.19]$ vs.\ anchor; $+0.56$ $[+0.01,+1.17]$ vs.\ FP), the highest-$\ell_{\text{init}}$ set is best (6.76 vs.\ FP 6.93), and the two-pole gap is significant ($-0.72$ $[-1.32,-0.18]$). The hard, transferable rule is \emph{exclude easy items}; ``prefer hard items'' is directional only (high-$\ell$ vs.\ anchor: $-0.10$, ns). At 3.5B all contrasts keep their sign but lose significance. We therefore claim the floor as a 1B-validated rule with direction-preserving replication, not as a scale-free law.
+
+\paragraph{Snapshot placement (Rule 3).}
+Rule~3 claims that the timbre value of calibration lies in late-step snapshots. Early-only placement significantly degrades SIM (\zh{} $-0.0025$, \en{} $-0.0055$); late$-$early is significant on both axes ($+0.0035$, $+0.0042$); coverage beyond two endpoint snapshots saturates (all ns). Placement contrasts are measured at 1B.
+% TODO(P1): add the 3.5B early2/late2 replication here when it lands. Over-weighting late steps in the calibration \emph{loss}, by contrast, buys no SIM and significantly damages \hard{} CER ($+0.63$): placement is a data-side lever, not a loss-side one (see also the negative results below).
+
+\paragraph{What does not select data.}
+Raising the hard-item ratio yields no significant gain. The only significant compositional effect at 1B (English items damaging \zh{} CER, $+0.32$) vanishes at 3.5B, so composition rules learned at one scale do not transfer. The transplanted salience scores (diffusion/quantization salience, deep-layer activation statistics) lack set-level discriminative power, with $C_\text{diff}$ additionally mis-directed on the timestep axis (Observation~1). Calibration data is worth constructing (Rule 1) and floor-filtering (Rule 2), but not worth scoring.
+
+\subsection{Attribution and Structure}
+\label{sec:attrexp}
+
+\begin{table*}[t]
+\centering
+\small
+\setlength{\tabcolsep}{5pt}
+\begin{tabular}{llcccccc}
+\toprule
+& Corner (W/A) & \zh{} CER$\downarrow$ & \hard{} CER$\downarrow$ & \en{} WER$\downarrow$ & \zh{} SIM$\uparrow$ & \hard{} SIM$\uparrow$ & \en{} SIM$\uparrow$ \\
+\midrule
+\multirow{4}{*}{1B}
+& FP (16/16)   & 1.193 & 6.888 & 2.114 & 0.8119 & 0.7901 & 0.7632 \\
+& W16A4        & 1.230 & 6.735 & 2.094 & \textbf{0.8108} & 0.7900 & \textbf{0.7607} \\
+& W4A16        & 1.151 & 6.617 & 2.272 & \textbf{0.8103} & \textbf{0.7874} & \textbf{0.7585} \\
+& W4A4         & 1.191 & 6.765 & 2.155 & \textbf{0.8091} & \textbf{0.7873} & \textbf{0.7554} \\
+\midrule
+\multirow{4}{*}{3.5B}
+& FP (16/16)   & 1.139 & 5.973 & 1.919 & 0.8190 & 0.7983 & 0.7834 \\
+& W16A4        & 1.167 & 6.186 & 1.909 & \textbf{0.8179} & 0.7986 & \textbf{0.7820} \\
+& W4A16        & 1.127 & 5.858 & 1.872 & \textbf{0.8180} & 0.7978 & \textbf{0.7819} \\
+& W4A4         & \textbf{1.249} & 5.936 & 1.813 & \textbf{0.8175} & 0.7985 & \textbf{0.7796} \\
+\bottomrule
+\end{tabular}
+\caption{Weight/activation attribution (full test sets). Bold: paired $\Delta$ vs.\ FP significant. The only significant text cell in either $2{\times}2$ is W4A4 \zh{} CER at 3.5B ($+0.110$ $[+0.012,+0.212]$), a weight$\times$activation \emph{interaction}: each factor alone is ns ($+0.028$ / $-0.011$).}
+\label{tab:attr}
+\end{table*}
+
+\begin{table*}[t]
+\centering
+\small
+\setlength{\tabcolsep}{5pt}
+\begin{tabular}{lccccccc}
+\toprule
+Protected class (budget) & \multicolumn{3}{c}{1B $\Delta$SIM vs.\ W4A4} & \multicolumn{3}{c}{3.5B $\Delta$SIM vs.\ W4A4} \\
+\cmidrule(lr){2-4}\cmidrule(lr){5-7}
+& \zh{} & \hard{} & \en{} & \zh{} & \hard{} & \en{} \\
+\midrule
+\cfg{early}: first 5 steps (33\%)   & $+0.0003$ & $-0.0015$\dworse & $-0.0001$ & $-0.0002$ & $-0.0006$ & $+0.0006$ \\
+\cfg{late}: last 5 steps (33\%)     & $+0.0014$\sig & $+0.0010$\sig & $+0.0019$\sig & $+0.0011$\sig & $+0.0004$ & $+0.0019$\sig \\
+\cfg{sattn}: self-attention (25\%)  & $-0.0005$ & $-0.0020$\dworse & $+0.0010$ & $-0.0001$ & $-0.0017$\dworse & $+0.0013$\sig \\
+\cfg{ffn}: FFN (50\%)               & $+0.0016$\sig & $+0.0015$\sig & $+0.0025$\sig & $+0.0010$\sig & $+0.0001$ & $+0.0016$\sig \\
+\cfg{late-ffn}: FFN$\times$late (17\%) & $+0.0012$\sig & $+0.0011$\sig & $+0.0014$\sig & $+0.0009$\sig & $+0.0004$ & $+0.0016$\sig \\
+\cfg{noact}: all activations (100\%) & $+0.0012$\sig & $+0.0001$ & $+0.0031$\sig & $+0.0005$\sig & $-0.0007$ & $+0.0024$\sig \\
+\bottomrule
+\end{tabular}
+\caption{Restoring one activation class to FP on the frozen W4A4 model (full test sets). \sig: significant recovery; \dworse: significantly \emph{worse} than W4A4. Budget = parameter-weighted share of activation traffic restored.}
+\label{tab:grid}
+\end{table*}
+
+Observation~2 makes two causal claims: the timbre cost has two additive sources, and its activation share sits in late-step FFNs. Table~\ref{tab:attr} carries the first (SIM shares approximately additive; no single-factor text cost; the lone interaction cell at 3.5B \zh{}), and Table~\ref{tab:grid} the second. Three readings of the grid follow. \emph{Time}: \cfg{late} helps significantly on five of six set$\times$scale combinations; \cfg{early} helps nowhere and significantly hurts on 1B \hard{}; the paired late$-$early contrast is positive on all six (significant on five). \emph{Module}: \cfg{ffn} beats \cfg{sattn} on five of six (1B contrasts $+0.0021/+0.0035/+0.0015$, all \sig); protecting self-attention is significantly counterproductive on \hard{} at both scales. \emph{Structure beats volume}: on \hard{}, targeted \cfg{late-ffn} at 17\% budget matches or beats \cfg{noact} at 100\%, because uniform protection drags the harmful self-attention share along. Text is guarded throughout: at 1B all 18 CER/WER cells are ns; at 3.5B the broad-activation configs significantly \emph{repair} the \zh{} interaction cost ($-0.12$ to $-0.11$), exactly as the $2{\times}2$ predicts.
+
+\subsection{Equal-Budget Certificate}
+\label{sec:isoexp}
+
+\begin{table}[t]
+\centering
+\small
+\setlength{\tabcolsep}{3.5pt}
+\begin{tabular}{llccc}
+\toprule
+& Contrast ($\Delta$SIM) & \zh{} & \hard{} & \en{} \\
+\midrule
+\multirow{2}{*}{1B}
+& time: late $-$ early   & $+0.0069$\sig & $+0.0054$\sig & $+0.0059$\sig \\
+& module: FFN $-$ attn   & $+0.0032$\sig & $+0.0027$\sig & $+0.0050$\sig \\
+\midrule
+\multirow{2}{*}{3.5B}
+& time: late $-$ early   & $+0.0050$\sig & $+0.0024$\sig & $+0.0047$\sig \\
+& module: FFN $-$ attn   & $+0.0005$ & $-0.0010$ & $+0.0029$\sig \\
+\bottomrule
+\end{tabular}
+\caption{Equal-budget reallocation (average activation width exactly 4.0 bits; full test sets). Time axis: A6 on the favored five steps, A3 elsewhere; module axis: A5/A3 split (at 3.5B the module pair is budget-symmetric around 4.0 with \cfg{iso-ffn} the \emph{cheaper} arm).}
+\label{tab:iso}
+\end{table}
+
+Adding budget trivially helps; Table~\ref{tab:iso} removes the budget. At a parameter-weighted average of exactly 4.0 activation bits, allocating the high-precision share to \emph{late} steps beats the mirrored early-heavy allocation on all six set$\times$scale combinations, with effects $3$--$5\times$ larger than the added-budget versions because A3 amplifies the price of misplacement. The module contrast is significant across the board at 1B; at 3.5B, \cfg{iso-ffn} wins \en{} despite carrying a 0.105-bit budget \emph{handicap} (its FFN share is 9/19 of parameters, making exact per-arm 4.0 unattainable). Against uniform A4 itself, \cfg{iso-late} at 3.5B is significantly \emph{better} on \zh{} despite the non-uniform arm's calibration mismatch, an existence proof that reallocation beats uniform; the mirrored \cfg{iso-early} is significantly worse than uniform on nearly every axis, so placement matters in both directions. Text axes are unmoved (1 borderline cell in 36 comparisons), and no A3 arm collapses.
+
+\subsection{What Does Not Work}
+\label{sec:negative}
+
+Two further families of interventions fail, and the failures delimit where task structure can enter PTQ. \emph{Calibration-loss reweighting} (six preregistered arms: spatial region weighting in two directions, channel-variance weighting, perceptual-gradient channel weighting driven by a WavLM speaker-similarity saliency, late-snapshot loss weighting, and depth-guided INT8 for the hardest-to-reconstruct blocks) goes 0/6: three arms actively damage the opposite axis, and even the arm guided by true task-metric gradients is cleanly null. Notably, halving the reconstruction loss of the hardest blocks leaves \hard{} CER unchanged: reconstruction fidelity and task quality are decoupled. A gradient-saliency analysis explains why: the blocks the calibration objective works hardest on are the least task-important (depth-profile anticorrelation $\rho=-0.94$/$-0.79$ across scales), and the task-salient channels are disjoint from both the high-variance channels that reweighting targets and the outlier channels that quantizers orbit (top-100 overlaps at chance). Perceptual guidance must therefore be injected where it acts, namely the data layer (Sec.~\ref{sec:tmc}) and the allocation layer (Sec.~\ref{sec:lateffn}), exactly where TTS-Q operates, and not through the reconstruction objective (full protocols and tables in Appendix).

@@ -1,0 +1,123 @@
+% Integrated method overview figure (fig:method).
+% Style: S2Q-VDiT Fig.2 (colored twin panels, formulas inline) x QuantVGGT Fig.2 (horizontal narrative bands).
+\begin{figure*}[t]
+\centering
+\begin{tikzpicture}[
+  font=\scriptsize,
+  box/.style={draw=gray!70, rounded corners=1.5pt, align=center, inner sep=3pt, fill=gray!8},
+  ptitle/.style={font=\small\bfseries\itshape},
+  note/.style={font=\scriptsize\itshape},
+  arr/.style={-{Stealth[length=1.8mm]}, semithick, draw=gray!45!black},
+  darr/.style={-{Stealth[length=1.6mm]}, thin, densely dashed, draw=gray!55},
+]
+% ================= TOP BAND: TTS DiT trajectory =================
+\draw[gray!55, densely dashed, rounded corners=3pt, line width=0.8pt] (0.05,4.05) rectangle (17.30,7.05);
+\node[ptitle, anchor=west, text=gray!35!black] at (0.25,6.78) {TTS DiT under W4A4: sampling trajectory};
+
+% inputs: text + prompt waveform
+\draw[draw=gray!70, fill=white] (0.42,5.72) rectangle (1.08,6.22);
+\foreach \yy in {5.84,5.97,6.10} \draw[gray!60] (0.52,\yy) -- (0.98,\yy);
+\node[note] at (0.75,5.55) {text $c$};
+\foreach \x/\h in {0.44/0.10, 0.52/0.22, 0.60/0.15, 0.68/0.30, 0.76/0.12, 0.84/0.26, 0.92/0.18, 1.00/0.28, 1.08/0.11}
+  \draw[teal!60!black, line width=1.1pt] (\x,4.78-\h) -- (\x,4.78+\h);
+\node[note] at (0.75,4.32) {prompt $p$};
+\draw[darr] (1.12,5.95) .. controls (1.9,5.75) .. (2.38,5.32);
+\draw[darr] (1.12,4.78) .. controls (1.9,4.75) .. (2.38,4.86);
+
+% late-region tint (behind cells)
+\fill[teal!10, rounded corners=2pt] (9.84,4.62) rectangle (13.56,5.98);
+\node[note, text=teal!45!black] at (11.70,6.14) {late ($K{=}5$)};
+
+% flow arrow on top
+\node[anchor=east] at (2.34,6.42) {$z_0$};
+\draw[arr] (2.38,6.42) -- node[above, note]{$z_{k}\!\to\!z_{k+1}$ (Eq.~\ref{eq:ode})} (13.90,6.42);
+
+% row labels
+\node[anchor=east, font=\tiny] at (2.36,5.75) {SA};
+\node[anchor=east, font=\tiny] at (2.36,5.30) {CA};
+\node[anchor=east, font=\tiny] at (2.36,4.85) {FFN};
+
+% 15 DiT block stacks
+\foreach \k in {0,...,14}{
+  \fill[gray!16, draw=white, line width=0.4pt] (2.41+0.75*\k,5.56) rectangle ++(0.58,0.38);
+  \fill[gray!16, draw=white, line width=0.4pt] (2.41+0.75*\k,5.11) rectangle ++(0.58,0.38);
+}
+\foreach \k in {0,...,9}
+  \fill[gray!16, draw=white, line width=0.4pt] (2.41+0.75*\k,4.66) rectangle ++(0.58,0.38);
+\foreach \k in {10,...,14}
+  \fill[teal!45, draw=white, line width=0.4pt] (2.41+0.75*\k,4.66) rectangle ++(0.58,0.38);
+
+% snapshot ticks (Rule 3) under steps 0 and 14
+\draw[teal!55!black, line width=1.4pt] (2.70,4.42) -- (2.70,4.62);
+\draw[teal!55!black, line width=1.4pt] (13.20,4.42) -- (13.20,4.62);
+\node[note, text=teal!45!black] at (7.95,4.28) {Rule~3: late-inclusive snapshots};
+
+% output: VAE -> waveform -> metrics
+\draw[arr] (13.60,5.30) -- (14.12,5.30);
+\node[box] (vae) at (14.48,5.30) {VAE};
+\draw[arr] (14.86,5.30) -- (15.14,5.30);
+\foreach \x/\h in {15.22/0.12, 15.30/0.26, 15.38/0.16, 15.46/0.30, 15.54/0.13, 15.62/0.24, 15.70/0.18, 15.78/0.27, 15.86/0.11}
+  \draw[gray!30!black, line width=1.1pt] (\x,5.30-\h) -- (\x,5.30+\h);
+\draw[darr] (15.92,5.44) -- (16.14,5.82);
+\draw[darr] (15.92,5.16) -- (16.14,4.80);
+\node[note, anchor=west] at (16.10,5.90) {CER$\downarrow$};
+\node[note, anchor=west] at (16.10,4.70) {SIM$\uparrow$};
+
+% ================= BOTTOM LEFT: TMC =================
+\draw[orange!80!black, rounded corners=3pt, line width=0.9pt] (0.05,0.05) rectangle (8.45,3.80);
+\node[ptitle, text=orange!70!black] at (4.25,3.55) {Task-Mirrored Calibration (Sec.~\ref{sec:tmc})};
+
+\node[box] (bench) at (1.15,2.72) {Seed-TTS-eval\\(target)};
+\node[box, fill=blue!7] (pool) at (3.70,2.72) {candidate pool};
+\node[box, fill=teal!12] (dset) at (6.95,2.72) {calibration set $\mathcal{D}$};
+\draw[arr] (bench) -- node[above, font=\scriptsize\bfseries]{Rule 1} (pool);
+\draw[arr] (pool) -- node[above, font=\scriptsize\bfseries]{Rule 2} (dset);
+
+% difficulty strip
+\node[note, anchor=west] at (0.45,1.90) {$\ell_{\text{init}}$ ranking (Eq.~\ref{eq:lossinit}):};
+\foreach [count=\i] \c in {8,16,26,38,50,64}
+  \fill[fill=blue!\c, draw=gray!60] (2.62+0.40*\i,1.76) rectangle ++(0.32,0.28);
+\draw[red!65!black, thick] (3.02,1.73) -- (3.34,2.07);
+\draw[red!65!black, thick] (3.34,1.73) -- (3.02,2.07);
+
+% rejected salience branch
+\node[box, draw=red!55, dashed, fill=red!4, text=red!60!black, align=center] (sal) at (2.05,0.72)
+  {salience scoring\\collapses (Eq.~\ref{eq:cv})};
+\draw[darr, draw=red!65!black] (pool.south) .. controls (3.4,1.3) .. (sal.north east);
+\node[red!65!black, font=\small] at (3.62,1.12) {$\times$};
+
+% FlatQuant calibration + link up to snapshots
+\node[box] (fq) at (6.95,0.95) {FlatQuant calib.\\(Eq.~\ref{eq:calib})};
+\draw[arr] (dset) -- (fq);
+\draw[darr, draw=teal!55!black] (fq.north east) .. controls (8.3,2.6) and (8.3,3.4) .. (8.20,4.18);
+\node[note, text=teal!45!black, rotate=68] at (8.52,3.05) {Rule 3};
+
+% ================= BOTTOM RIGHT: allocation =================
+\draw[teal!55!black, rounded corners=3pt, line width=0.9pt] (8.75,0.05) rectangle (17.30,3.80);
+\node[ptitle, text=teal!45!black] at (13.02,3.55) {Structure-Aligned Precision Allocation (Sec.~\ref{sec:lateffn})};
+
+\node[note] at (13.02,3.05) {\textbf{Obs.~2:} timbre lives in FFN $\times$ late activations};
+
+\fill[teal!45, draw=gray!50] (9.15,2.40) rectangle ++(0.28,0.20);
+\node[anchor=west, note] at (9.50,2.50) {\cfg{late-ffn}: FP16, $\approx\!1/6$ traffic (Eq.~\ref{eq:schedule})};
+\fill[gray!16, draw=gray!50] (9.15,2.02) rectangle ++(0.28,0.20);
+\node[anchor=west, note] at (9.50,2.12) {INT4};
+\node[note] at (13.02,1.62) {vision: protect \emph{early} $\times$ \;\; TTS: protect \emph{late} $\checkmark$};
+
+% iso strips
+\node[anchor=east, font=\tiny] at (10.32,1.10) {$a_{\text{late}}$};
+\foreach \k in {0,...,9}  \fill[gray!20, draw=white] (10.40+0.30*\k,1.00) rectangle ++(0.28,0.20);
+\foreach \k in {10,...,14}\fill[teal!60, draw=white] (10.40+0.30*\k,1.00) rectangle ++(0.28,0.20);
+\node[anchor=east, font=\tiny] at (10.32,0.66) {$a_{\text{early}}$};
+\foreach \k in {0,...,4}  \fill[teal!60, draw=white] (10.40+0.30*\k,0.56) rectangle ++(0.28,0.20);
+\foreach \k in {5,...,14} \fill[gray!20, draw=white] (10.40+0.30*\k,0.56) rectangle ++(0.28,0.20);
+\node[anchor=west, note] at (15.05,1.10) {A6};
+\node[anchor=west, note] at (15.05,0.66) {A3};
+\node[note, anchor=west] at (9.60,0.24) {equal budget $\mathcal{B}{=}4.0$: $a_{\text{late}} \succ a_{\text{early}}$ (Eq.~\ref{eq:iso})};
+
+% link from panel up to painted schedule
+\draw[darr, draw=teal!55!black] (11.60,3.82) -- (11.60,4.58);
+\end{tikzpicture}
+\caption{Overview of the proposed method. \textbf{Top}: the TTS DiT synthesizes speech from text $c$ and a speaker prompt $p$ along a 15-step flow-matching trajectory (each step evaluates self-attention, cross-attention, and FFN); quality is read out as intelligibility (CER: does it say $c$?) and speaker similarity (SIM: does it sound like $p$?). Under the \cfg{late-ffn} schedule only FFN activations in the last $K{=}5$ steps run in FP16 (teal), everything else in INT4. \textbf{Bottom left}: task-mirrored calibration builds the calibration set by construction, a pool that mirrors the benchmark's form (Rule~1) plus a difficulty floor over $\ell_{\text{init}}$ (Rule~2), and places calibration snapshots so that late steps are covered (Rule~3); per-item salience scoring is rejected because set-level mean scores concentrate (Eq.~\ref{eq:cv}). \textbf{Bottom right}: the causal structure behind the schedule (Obs.~2) and the equal-budget certificate (Eq.~\ref{eq:iso}) showing that placement, not extra precision, carries the gain.}
+\label{fig:method}
+\end{figure*}

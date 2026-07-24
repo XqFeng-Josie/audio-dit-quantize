@@ -6,7 +6,9 @@ IDENTICAL noise -> clean paired comparison (noise + order removed as confounds).
 
 modes: fp32 | int8 (W8A8) | rtn (naive W4A4) | svdquant (W4A4) | quarot (W4A4 Hadamard, training-free)
       | quarot_gptq (W4A4 Hadamard + GPTQ weights, the QuaRot paper-best config)
-SVDQuant / QuaRot-GPTQ calibration uses --calib_lst (default: SEED_CALIB_LST env or paths.CALIB_LST).
+      | gptq (W4A4 GPTQ weights, NO rotation — ladder ablation) | smoothquant (W4A4 scale migration)
+Calibrated modes (svdquant/quarot_gptq/gptq/smoothquant) use --calib_lst (default: SEED_CALIB_LST env
+or paths.CALIB_LST).
 
 Usage:
   python -m audio_dit_quantize.generate_seedtts --mode fp32 --tag fp32 --base 1024
@@ -36,7 +38,7 @@ def _valid_wav(wav):
 
 
 def prep(mode, model, tok, dev, rank, calib_seed, w_clip_ratio=1.0,
-         svd_rows=2048, svd_iters=None, svd_asym=False, calib_lst=None):
+         svd_rows=2048, svd_iters=None, svd_asym=False, calib_lst=None, sq_alpha=0.5):
     if mode == "fp32":
         return
     if mode == "int8":
@@ -52,21 +54,41 @@ def prep(mode, model, tok, dev, rank, calib_seed, w_clip_ratio=1.0,
         wrapped = qr.wrap_dit(model, w_bits=4, a_bits=4, w_clip_ratio=w_clip_ratio, freeze=True)
         print(f"[quarot] wrapped+froze {len(wrapped)} W4A4 linears (Hadamard rotation, training-free)", flush=True)
         return
-    if mode == "quarot_gptq":
+    if mode in ("quarot_gptq", "gptq"):
         # QuaRot-GPTQ W4A4 (paper-best): Hadamard rotation + GPTQ weights with --w_clip MSE search.
+        # mode "gptq" = the ladder ablation: IDENTICAL pipeline (solver, clip search, sym per-token
+        # A4) with rotation disabled (R = I) — isolates the Hadamard's contribution.
         # Calib protocol matches flatquant_best (same CALIB_LST, same 64x2 block-0 capture recipe)
         # so the calibration-data budget is identical across the learned/calibrated methods.
         from .flatquant_best import capture_block_inputs
         if calib_seed is not None:
             torch.manual_seed(calib_seed)
             torch.cuda.manual_seed_all(calib_seed)
-            print(f"[prep] quarot_gptq calibration pinned to seed {calib_seed}", flush=True)
+            print(f"[prep] {mode} calibration pinned to seed {calib_seed}", flush=True)
         calib = rs.load_calib_items(calib_lst)
         store = capture_block_inputs(model, tok, dev, calib, max_seqs=64, per_item_keep=2)
-        print(f"[quarot_gptq] captured {len(store)} sequences", flush=True)
-        wrapped = qr.wrap_dit(model, w_bits=4, a_bits=4, w_clip_ratio=w_clip_ratio, freeze=False)
-        print(f"[quarot_gptq] wrapped {len(wrapped)} linears; sequential per-block GPTQ ...", flush=True)
+        print(f"[{mode}] captured {len(store)} sequences", flush=True)
+        wrapped = qr.wrap_dit(model, w_bits=4, a_bits=4, w_clip_ratio=w_clip_ratio, freeze=False,
+                              rotate=(mode == "quarot_gptq"))
+        print(f"[{mode}] wrapped {len(wrapped)} linears (rotate={mode == 'quarot_gptq'}); "
+              f"sequential per-block GPTQ ...", flush=True)
         qr.calibrate_gptq(model, store, dev, w_clip_mse=True)
+        return
+    if mode == "smoothquant":
+        # SmoothQuant W4A4 (scale-migration baseline, alpha=sq_alpha): fp amax pass -> fold s
+        # into weights -> W4 per-out-channel sym + A4 per-token sym (same primitives as quarot).
+        from .flatquant_best import capture_block_inputs
+        from . import smoothquant_linear as sql
+        if calib_seed is not None:
+            torch.manual_seed(calib_seed)
+            torch.cuda.manual_seed_all(calib_seed)
+            print(f"[prep] smoothquant calibration pinned to seed {calib_seed}", flush=True)
+        calib = rs.load_calib_items(calib_lst)
+        store = capture_block_inputs(model, tok, dev, calib, max_seqs=64, per_item_keep=2)
+        print(f"[smoothquant] captured {len(store)} sequences", flush=True)
+        wrapped = sql.wrap_dit(model, w_bits=4, a_bits=4, alpha=sq_alpha)
+        print(f"[smoothquant] wrapped {len(wrapped)} linears (alpha={sq_alpha}); calibrating ...", flush=True)
+        sql.calibrate_smoothquant(model, store, dev)
         return
     if mode == "svdquant":
         if calib_seed is not None:
@@ -83,7 +105,10 @@ def prep(mode, model, tok, dev, rank, calib_seed, w_clip_ratio=1.0,
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--mode", required=True,
-                    choices=["fp32", "int8", "rtn", "svdquant", "quarot", "quarot_gptq"])
+                    choices=["fp32", "int8", "rtn", "svdquant", "quarot", "quarot_gptq",
+                             "gptq", "smoothquant"])
+    ap.add_argument("--sq_alpha", type=float, default=0.5,
+                    help="[smoothquant] migration strength alpha (paper default 0.5)")
     ap.add_argument("--tag", required=True)
     ap.add_argument("--w_clip_ratio", type=float, default=1.0, help="quarot weight absmax clip ratio (QuaRot~0.9)")
     ap.add_argument("--base", type=int, default=1024, help="per-item seed = base + item_index")
@@ -119,10 +144,11 @@ def main():
     args = ap.parse_args()
     dev = torch.device(args.device)
 
-    calibrated_mode = args.mode in ("svdquant", "quarot_gptq")
+    calibrated_mode = args.mode in ("svdquant", "quarot_gptq", "gptq", "smoothquant")
     if calibrated_mode and (args.load_model or args.save_model or args.calibrate_only):
-        from .paths import qgptq_model_path, svd_model_path
-        path_fn = svd_model_path if args.mode == "svdquant" else qgptq_model_path
+        from .paths import gptq_model_path, qgptq_model_path, sq_model_path, svd_model_path
+        path_fn = {"svdquant": svd_model_path, "quarot_gptq": qgptq_model_path,
+                   "gptq": gptq_model_path, "smoothquant": sq_model_path}[args.mode]
         model_path = args.model or str(path_fn(args.model_dir))
 
     if calibrated_mode and args.load_model:
@@ -138,7 +164,7 @@ def main():
         tok = AutoTokenizer.from_pretrained(model.config.text_encoder_model)
         prep(args.mode, model, tok, dev, args.rank, args.calib_seed, args.w_clip_ratio,
              svd_rows=args.svd_rows, svd_iters=args.svd_iters, svd_asym=args.svd_asym,
-             calib_lst=args.calib_lst)
+             calib_lst=args.calib_lst, sq_alpha=args.sq_alpha)
         if calibrated_mode and (args.save_model or args.calibrate_only):
             os.makedirs(os.path.dirname(model_path) or ".", exist_ok=True)
             torch.save(model, model_path)

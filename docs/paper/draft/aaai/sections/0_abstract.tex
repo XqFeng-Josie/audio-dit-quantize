@@ -1,0 +1,10 @@
+Zero-shot text-to-speech (TTS) can clone a voice from seconds of audio. 
+Yet the quality comes from billion-parameter diffusion transformers whose size and multi-step sampling put them out of reach of the on-device, assistive, and real-time applications that need them most.
+Post-training quantization (PTQ) shrinks such models without retraining, but it has been built for language and vision, not speech. 
+At 4 bits, quantization harms intelligibility far more than timbre, so similarity scores stay high while the model becomes harder to understand. 
+We ask why quantization hurts speech, where the damage lives, and whether it can be repaired without retraining. 
+To find out, we run the first 4-bit weight-and-activation (W4A4) PTQ study of a TTS diffusion transformer at 1B and 3.5B. 
+Intelligibility damage traces to the weight quantization, timbre damage to the activation quantization, and the precision-allocation rules from vision reverse in speech. 
+Because timbre damage lives in the activations, we keep only the late-step feed-forward activations at full precision, one sixth of the budget. 
+The method recovers timbre best at both scales, at no cost to intelligibility. 
+This brings high-quality TTS within reach of the real-time and on-device applications that need it.

@@ -69,7 +69,10 @@ def _move(obj, dev):
 # ── capture block-0 input + shared conditioning across calib generations ──────
 @torch.no_grad()
 def capture_block_inputs(model, tok, dev, calib_items, max_seqs, per_item_keep, nfe=16,
-                         snap_place="spread"):
+                         snap_place="spread", return_steps=False):
+    """return_steps=True additionally returns the per-sequence NETWORK-STEP index (capture index // 2,
+    because CFG runs cond+uncond forwards per ODE step — same step convention as generate_step_axis).
+    Default return shape is unchanged (callers that unpack 3-tuples are unaffected)."""
     block0 = model.transformer.blocks[0]
     cur = []  # current item's (x_cpu, cond_kwargs_cpu, prompt_dur) captures
     state = {"pd": 0}  # prompt latent length (prompt/generation-region boundary) of the current item
@@ -85,7 +88,7 @@ def capture_block_inputs(model, tok, dev, calib_items, max_seqs, per_item_keep, 
     def _enc(pa):
         lat, pd = _orig_enc(pa); state["pd"] = int(pd); return lat, pd
 
-    store = []
+    store, steps_of = [], []
     try:
         model.encode_prompt_audio = _enc
         for it in tqdm(calib_items, desc="capture calib", dynamic_ncols=True):
@@ -110,11 +113,12 @@ def capture_block_inputs(model, tok, dev, calib_items, max_seqs, per_item_keep, 
                 idx = [round(i * (n - 1) / max(1, k - 1)) for i in range(k)] if k > 1 else [0]
             for j in sorted(set(idx)):
                 store.append(cur[j])
+                steps_of.append(j // 2)   # capture index -> network step (2 CFG forwards per step)
             if len(store) >= max_seqs:
                 break
     finally:
         del model.encode_prompt_audio     # restore the class method
-    return store[:max_seqs]
+    return (store[:max_seqs], steps_of[:max_seqs]) if return_steps else store[:max_seqs]
 
 
 def _block_wrappers(block):
@@ -138,12 +142,13 @@ def _chanbal_weight(fp_outs, dev, invert=True):
 
 
 def calibrate_perblock(model, store, dev, steps=200, mb=4, lr=5e-3, clip_lr=5e-2, loss_type="mse",
-                       region_gen_w=1.0, region_prompt_w=1.0, drift=False, diag_alpha=0.3,
+                       region_gen_w=1.0, region_prompt_w=1.0, snap_w=None, chan_w=None,
+                       drift=False, diag_alpha=0.3,
                        diag_init=True, stats_out=None, stats_meta=None):
     """stats_out: optional JSON path — records per-block first/last/min training loss. These are
     cheap calibration-set-quality signals for the P1 proxy-feature regression (computable without
     any generation/eval). Pure logging: the training math is untouched."""
-    assert loss_type in ("mse", "chanbal", "varw")
+    assert loss_type in ("mse", "chanbal", "varw", "percw")
     blocks = model.transformer.blocks
     for p in model.parameters():              # only the per-block quant params train; freeze the rest
         p.requires_grad_(False)
@@ -165,10 +170,24 @@ def calibrate_perblock(model, store, dev, steps=200, mb=4, lr=5e-3, clip_lr=5e-2
             wtoks.append((w / w.mean().clamp(min=1e-6)).to(dev))
     else:
         wtoks = None
+    # per-SEQUENCE snapshot weight (L-B, perception-guided loss: up-weight snapshots from the ODE steps
+    # the task says matter — late steps carry SIM). Mean-normalized to preserve loss scale.
+    if snap_w is not None:
+        assert len(snap_w) == n, f"snap_w len {len(snap_w)} != n seqs {n}"
+        _m = sum(snap_w) / n
+        snap_w = [float(w) / max(_m, 1e-6) for w in snap_w]
+    # per-(block, hidden-channel) PERCEPTUAL weight (L-C): fixed guidance from calib.spk_saliency,
+    # mean-normalized per block exactly like _chanbal_weight so percw is comparable with chanbal/varw.
+    if loss_type == "percw":
+        assert chan_w is not None, "loss_type percw needs chan_w (--chan_w_file)"
+        assert chan_w.shape[0] == len(blocks), \
+            f"chan_w has {chan_w.shape[0]} blocks, model has {len(blocks)}"
+        chan_w = [(w / w.mean().clamp(min=1e-12)).float().to(dev) for w in chan_w]
     print(f"[pb] {n} calib seqs, {len(blocks)} blocks, {steps} steps x mb{mb} each"
           + f" | {'DRIFT (legacy)' if drift else 'fp-propagation (official)'}"
           + (f" | sq_style diag init a={diag_alpha}" if diag_init else "")
-          + (f" | region gen_w={region_gen_w} prompt_w={region_prompt_w}" if region else ""))
+          + (f" | region gen_w={region_gen_w} prompt_w={region_prompt_w}" if region else "")
+          + (f" | snap_w norm range [{min(snap_w):.3f}, {max(snap_w):.3f}]" if snap_w is not None else ""))
     t0 = time.time()
     stats = []
     for bi, blk in enumerate(blocks):
@@ -188,8 +207,11 @@ def calibrate_perblock(model, store, dev, steps=200, mb=4, lr=5e-3, clip_lr=5e-2
             w.enable_quant = True
             if diag_init:
                 w.init_diag_scale(alpha=diag_alpha)
-        cbw = (_chanbal_weight(fp_outs, dev, invert=(loss_type == "chanbal"))
-               if loss_type in ("chanbal", "varw") else None)   # [dim] or None
+        if loss_type == "percw":
+            cbw = chan_w[bi]                                    # [dim] perceptual guidance (L-C)
+        else:
+            cbw = (_chanbal_weight(fp_outs, dev, invert=(loss_type == "chanbal"))
+                   if loss_type in ("chanbal", "varw") else None)   # [dim] or None
         # 2) train block's quant params to match fp_out (block output MSE, optionally chan-balanced)
         trans_p, clip_p = [], []
         for w in ws:
@@ -220,7 +242,10 @@ def calibrate_perblock(model, store, dev, steps=200, mb=4, lr=5e-3, clip_lr=5e-2
                     se = (out - tgt) ** 2
                     if wtoks is not None:
                         se = wtoks[j][None, :, None] * se       # per-token region weight (broadcast over channels)
-                    loss = loss + (se.mean() if cbw is None else (cbw * se).mean())
+                    contrib = se.mean() if cbw is None else (cbw * se).mean()
+                    if snap_w is not None:
+                        contrib = snap_w[j] * contrib           # per-sequence snapshot-step weight (L-B)
+                    loss = loss + contrib
                 loss = loss / len(perm)
                 blk_losses.append(float(loss.detach()))
                 (loss / loss.detach().clamp(min=1e-12)).backward()
@@ -275,10 +300,13 @@ def main():
     ap.add_argument("--mb", type=int, default=4)
     ap.add_argument("--lr", type=float, default=5e-3)
     ap.add_argument("--clip_lr", type=float, default=5e-2)
-    ap.add_argument("--loss", default="mse", choices=["mse", "chanbal", "varw"],
+    ap.add_argument("--loss", default="mse", choices=["mse", "chanbal", "varw", "percw"],
                     help="per-block reconstruction objective: mse (default) / chanbal "
                          "(per-hidden-channel inverse-variance weighted) / varw (M3: variance-weighted, "
-                         "the reversed-direction channel-sensitivity hypothesis)")
+                         "the reversed-direction channel-sensitivity hypothesis) / percw (L-C: "
+                         "speaker-perceptual saliency weights from --chan_w_file)")
+    ap.add_argument("--chan_w_file", default=None,
+                    help="[percw] npz from calib.spk_saliency with sal [n_blocks, d]")
     ap.add_argument("--region_gen_w", type=float, default=1.0,
                     help="per-token weight for the GENERATION region ([prompt_dur:]) in the block MSE. "
                          ">1 up-weights synthesis (LEAD 2, targets CER/coverage). 1.0 = off.")
@@ -289,6 +317,13 @@ def main():
                     help="which ODE steps the per-item activation snapshots come from. spread (canonical) "
                          "= endpoint-inclusive stride (at per_item_keep=2: first+last step ONLY); "
                          "early/late = the first/last per_item_keep steps (L2 placement arms).")
+    ap.add_argument("--snap_late_w", type=float, default=1.0,
+                    help="L-B (perception-guided loss): per-sequence weight for snapshots from LATE5 "
+                         "network steps (10-14; at per_item_keep=2 spread = the last-step snapshot) in the "
+                         "block MSE. Continuous dose version of the L2 'late' placement SIM lever. 1.0 = off.")
+    ap.add_argument("--snap_early_w", type=float, default=1.0,
+                    help="per-sequence weight for EARLY5-step (0-4) snapshots — the mirrored control arm "
+                         "of --snap_late_w. 1.0 = off.")
     ap.add_argument("--w_bits", type=int, default=4,
                     help="weight bit-width for all target linears. 16 = leave weights full-precision "
                          "(transform still folded; LWC disabled) -> the W16A4 attribution corner: "
@@ -355,9 +390,17 @@ def main():
         calib = load_items(calib_lst)
         print(f"[pb] calib = {len(calib)} items from {calib_lst}")
         print(f"[pb] capturing block-0 activations on {len(calib)} prompts ...")
-        store = capture_block_inputs(model, tok, dev, calib, args.max_seqs, args.per_item_keep,
-                                     snap_place=args.snap_place)
-        print(f"[pb] captured {len(store)} sequences (snap_place={args.snap_place})")
+        store, snap_steps = capture_block_inputs(model, tok, dev, calib, args.max_seqs, args.per_item_keep,
+                                                 snap_place=args.snap_place, return_steps=True)
+        print(f"[pb] captured {len(store)} sequences (snap_place={args.snap_place}; "
+              f"snapshot steps present: {sorted(set(snap_steps))})")
+        snap_w = None
+        if args.snap_late_w != 1.0 or args.snap_early_w != 1.0:
+            snap_w = [args.snap_early_w if s < 5 else (args.snap_late_w if s >= 10 else 1.0)
+                      for s in snap_steps]
+            print(f"[pb] L-B snapshot weights: early5 x{args.snap_early_w} / mid x1 / late5 x{args.snap_late_w} "
+                  f"({sum(1 for s in snap_steps if s >= 10)} late / {sum(1 for s in snap_steps if s < 5)} early "
+                  f"/ {sum(1 for s in snap_steps if 5 <= s < 10)} mid seqs)")
         if args.a_sym:
             print("[pb] note: --a_sym is deprecated (symmetric is now the default)")
         # w_bits=16 -> weights stay fp (WeightQuantizer no-ops at 16 bits); LWC off so the clip
@@ -378,18 +421,28 @@ def main():
                     n_up += 1
             print(f"[pb] W1 mixed precision: {n_up} linears in blocks {w8} calibrate at INT8 weights "
                   f"(rest {args.w_bits}-bit)")
+        chan_w = None
+        if args.loss == "percw":
+            if not args.chan_w_file:
+                raise SystemExit("--loss percw requires --chan_w_file (produce it with "
+                                 "python -m audio_dit_quantize.calib.spk_saliency)")
+            chan_w = torch.from_numpy(np.load(args.chan_w_file)["sal"])
+            print(f"[pb] percw perceptual channel weights from {args.chan_w_file}: {tuple(chan_w.shape)}")
         calibrate_perblock(model, store, dev, steps=args.steps, mb=args.mb,
                            lr=args.lr, clip_lr=args.clip_lr, loss_type=args.loss,
                            region_gen_w=args.region_gen_w, region_prompt_w=args.region_prompt_w,
-                           drift=args.drift, diag_alpha=args.diag_alpha,
+                           snap_w=snap_w, chan_w=chan_w, drift=args.drift, diag_alpha=args.diag_alpha,
                            diag_init=not args.no_diag_init and not args.no_diag,
                            stats_out=os.path.join(genroot, "calib_block_losses.json"),
                            stats_meta={"calib_lst": str(calib_lst), "calib_seed": args.calib_seed,
                                        "steps": args.steps, "mb": args.mb,
                                        "max_seqs": args.max_seqs, "per_item_keep": args.per_item_keep,
-                                       "snap_place": args.snap_place, "w_bits": args.w_bits,
+                                       "snap_place": args.snap_place,
+                                       "snap_late_w": args.snap_late_w, "snap_early_w": args.snap_early_w,
+                                       "w_bits": args.w_bits,
                                        "w8_blocks": args.w8_blocks,
-                                       "loss": args.loss, "model_dir": args.model_dir,
+                                       "loss": args.loss, "chan_w_file": args.chan_w_file,
+                                       "model_dir": args.model_dir,
                                        "n_calib_items": len(calib), "n_seqs": len(store)})
         if args.save_model:
             os.makedirs(os.path.dirname(model_path) or ".", exist_ok=True)
